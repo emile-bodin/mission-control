@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 const unknownState = "Onbekend";
 
 export default function TodayPage() {
@@ -9,6 +11,9 @@ export default function TodayPage() {
         <p className="mt-4 max-w-2xl text-lg text-slate-300">
           Persoonlijke cockpit voor feitelijke projectstatus en volgende stappen.
         </p>
+        <Link className="mt-6 inline-block text-cyan-300 underline" href="/projects">
+          Bekijk projecten
+        </Link>
       </header>
 
       <section className="grid gap-4 md:grid-cols-3" aria-label="Overzicht">
