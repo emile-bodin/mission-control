@@ -21,6 +21,8 @@ services:
       PULSE_API_TOKEN: ${PULSE_API_TOKEN:-}
       DEVICE_TOKEN_PEPPER: ${DEVICE_TOKEN_PEPPER:?Set DEVICE_TOKEN_PEPPER in .env}
       DEVICE_ADMIN_TOKEN: ${DEVICE_ADMIN_TOKEN:?Set DEVICE_ADMIN_TOKEN in .env}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
