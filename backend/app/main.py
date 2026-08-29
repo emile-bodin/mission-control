@@ -154,6 +154,28 @@ class StatusCardPatch(BaseModel):
     resolved: bool | None = None
 
 
+class CodexRunInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1)
+    linear_issue: str = "Unknown"
+    repo: str = "Unknown"
+    branch: str = "Unknown"
+    start_sha: str = "Unknown"
+    end_sha: str = "Unknown"
+    commit_sha: str = "Unknown"
+    model: str = "Unknown"
+    profile: str = "Unknown"
+    reasoning_level: str = "Unknown"
+    session_type: str = "Unknown"
+    status: str = "Unknown"
+    summary: str = "Unknown"
+    verification: str = "Unknown"
+    changed_files: str = "Unknown"
+    risks: str = "Unknown"
+    next_step: str = "Unknown"
+
+
 class ActionInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -215,6 +237,13 @@ ACTION_COLUMNS = """
 STATUS_CARD_COLUMNS = """
     id, project_id, title, status, facts, interpretation, next_safe_step,
     source_type, source_reference, last_checked_at, created_at, updated_at, resolved_at
+"""
+
+
+CODEX_RUN_COLUMNS = """
+    id, project_id, linear_issue, repo, branch, start_sha, end_sha, commit_sha,
+    model, profile, reasoning_level, session_type, status, summary, verification,
+    changed_files, risks, next_step, created_at
 """
 
 
@@ -548,6 +577,31 @@ def run_migrations() -> None:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS codex_runs (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL REFERENCES projects(slug) ON DELETE RESTRICT,
+                    linear_issue TEXT NOT NULL DEFAULT 'Unknown',
+                    repo TEXT NOT NULL DEFAULT 'Unknown',
+                    branch TEXT NOT NULL DEFAULT 'Unknown',
+                    start_sha TEXT NOT NULL DEFAULT 'Unknown',
+                    end_sha TEXT NOT NULL DEFAULT 'Unknown',
+                    commit_sha TEXT NOT NULL DEFAULT 'Unknown',
+                    model TEXT NOT NULL DEFAULT 'Unknown',
+                    profile TEXT NOT NULL DEFAULT 'Unknown',
+                    reasoning_level TEXT NOT NULL DEFAULT 'Unknown',
+                    session_type TEXT NOT NULL DEFAULT 'Unknown',
+                    status TEXT NOT NULL DEFAULT 'Unknown',
+                    summary TEXT NOT NULL DEFAULT 'Unknown',
+                    verification TEXT NOT NULL DEFAULT 'Unknown',
+                    changed_files TEXT NOT NULL DEFAULT 'Unknown',
+                    risks TEXT NOT NULL DEFAULT 'Unknown',
+                    next_step TEXT NOT NULL DEFAULT 'Unknown',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS assets (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -657,6 +711,48 @@ def update_project(
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return updated
+
+
+@app.get("/api/codex-runs")
+def list_codex_runs(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {CODEX_RUN_COLUMNS} FROM codex_runs ORDER BY created_at DESC")
+        return cursor.fetchall()
+
+
+@app.get("/api/projects/{slug}/codex-runs")
+def list_project_codex_runs(slug: str, connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT slug FROM projects WHERE slug = %s", (slug,))
+        if cursor.fetchone() is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+        cursor.execute(
+            f"SELECT {CODEX_RUN_COLUMNS} FROM codex_runs WHERE project_id = %s ORDER BY created_at DESC",
+            (slug,),
+        )
+        return cursor.fetchall()
+
+
+@app.post("/api/codex-runs", status_code=status.HTTP_201_CREATED)
+def create_codex_run(run: CodexRunInput, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    values = run.model_dump()
+    values["id"] = str(uuid4())
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO codex_runs (
+                id, project_id, linear_issue, repo, branch, start_sha, end_sha, commit_sha,
+                model, profile, reasoning_level, session_type, status, summary, verification,
+                changed_files, risks, next_step
+            ) VALUES (
+                %(id)s, %(project_id)s, %(linear_issue)s, %(repo)s, %(branch)s, %(start_sha)s, %(end_sha)s, %(commit_sha)s,
+                %(model)s, %(profile)s, %(reasoning_level)s, %(session_type)s, %(status)s, %(summary)s, %(verification)s,
+                %(changed_files)s, %(risks)s, %(next_step)s
+            ) RETURNING {CODEX_RUN_COLUMNS}
+            """,
+            values,
+        )
+        return cursor.fetchone()
 
 
 @app.get("/api/status-cards")

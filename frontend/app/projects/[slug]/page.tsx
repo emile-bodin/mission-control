@@ -6,6 +6,8 @@ import { useEffect, useState } from "react";
 import { Project, ProjectForm } from "../project-form";
 import type { StatusCard } from "../../status-cards/status-card-form";
 
+type CodexRun = { id: string; linear_issue: string; branch: string; status: string; model: string; created_at: string };
+
 const labels: Record<keyof Project, string> = {
   name: "Name", slug: "Slug", display_name: "Display name", product_key: "Product key", source_type: "Source type",
   linear_project_name: "Linear project name", linear_project_url: "Linear project URL", linear_team_key: "Linear team key",
@@ -17,16 +19,18 @@ export default function ProjectDetailPage() {
   const { slug } = useParams<{ slug: string }>();
   const [project, setProject] = useState<Project>();
   const [cards, setCards] = useState<StatusCard[]>([]);
+  const [runs, setRuns] = useState<CodexRun[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    Promise.all([fetch(`/api/projects/${slug}`), fetch(`/api/projects/${slug}/status-cards`)])
-      .then(([projectResponse, cardsResponse]) => projectResponse.ok && cardsResponse.ok
-        ? Promise.all([projectResponse.json(), cardsResponse.json()])
+    Promise.all([fetch(`/api/projects/${slug}`), fetch(`/api/projects/${slug}/status-cards`), fetch(`/api/projects/${slug}/codex-runs`)])
+      .then(([projectResponse, cardsResponse, runsResponse]) => projectResponse.ok && cardsResponse.ok && runsResponse.ok
+        ? Promise.all([projectResponse.json(), cardsResponse.json(), runsResponse.json()])
         : Promise.reject())
-      .then(([loadedProject, loadedCards]) => {
+      .then(([loadedProject, loadedCards, loadedRuns]) => {
         setProject(loadedProject);
         setCards(loadedCards);
+        setRuns(loadedRuns);
       })
       .catch(() => setError("Project kon niet worden geladen."));
   }, [slug]);
@@ -46,6 +50,13 @@ export default function ProjectDetailPage() {
         <div className="mt-6 grid gap-3">
           {cards.map((card) => <Link className="rounded border border-slate-800 p-4" href={`/status-cards/${card.id}`} key={card.id}><p className="text-sm text-cyan-300">{card.status}{card.resolved_at ? " · opgelost" : ""}</p><h3 className="mt-1 font-semibold text-white">{card.title}</h3><p className="mt-2 text-sm text-slate-300">{card.next_safe_step}</p></Link>)}
           {!cards.length && <p className="text-slate-300">Geen statuskaarten.</p>}
+        </div>
+      </section>
+      <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
+        <div className="flex items-start justify-between gap-4"><h2 className="text-2xl font-semibold text-white">Laatste Codex-runs</h2><Link className="text-cyan-300 underline" href={`/codex-runs/new?project_id=${slug}`}>Nieuwe Codex-run</Link></div>
+        <div className="mt-6 grid gap-3">
+          {runs.slice(0, 5).map((run) => <article className="rounded border border-slate-800 p-4" key={run.id}><p className="text-sm text-cyan-300">{run.status || "Unknown"} · {run.linear_issue || "Unknown"}</p><h3 className="mt-1 font-semibold text-white">{run.branch || "Unknown"}</h3><p className="mt-2 text-sm text-slate-300">{run.model || "Unknown"} · {run.created_at || "Unknown"}</p></article>)}
+          {!runs.length && <p className="text-slate-300">Geen Codex-runs.</p>}
         </div>
       </section>
       <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
