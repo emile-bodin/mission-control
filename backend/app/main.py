@@ -1,8 +1,10 @@
 from collections.abc import Generator
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 import os
+from urllib.error import URLError
+from urllib.request import urlopen
 from uuid import uuid4
 
 import psycopg
@@ -42,6 +44,48 @@ class AssetStatus(str, Enum):
     OK = "OK"
     ATTENTION = "Let op"
     ERROR = "Fout"
+
+
+def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str, str]]:
+    if "BEGIN:VCALENDAR" not in content:
+        raise ValueError("Invalid ICS calendar")
+
+    unfolded: list[str] = []
+    for line in content.replace("\r\n", "\n").split("\n"):
+        if line.startswith((" ", "\t")) and unfolded:
+            unfolded[-1] += line[1:]
+        else:
+            unfolded.append(line)
+
+    events: list[dict[str, str]] = []
+    fields: dict[str, str] = {}
+    in_event = False
+    for line in unfolded:
+        if line == "BEGIN:VEVENT":
+            fields = {}
+            in_event = True
+            continue
+        if line == "END:VEVENT" and in_event:
+            starts_at = fields.get("DTSTART")
+            summary = fields.get("SUMMARY")
+            if starts_at and summary:
+                try:
+                    value = starts_at.rstrip("Z")
+                    pattern = "%Y%m%d" if len(value) == 8 else "%Y%m%dT%H%M%S" if len(value) == 15 else "%Y%m%dT%H%M"
+                    start = datetime.strptime(value, pattern)
+                    if starts_at.endswith("Z"):
+                        start = start.replace(tzinfo=UTC).astimezone().replace(tzinfo=None)
+                    if start >= (now or datetime.now()):
+                        events.append({"starts_at": start.isoformat(timespec="minutes"), "summary": summary})
+                except ValueError:
+                    pass
+            in_event = False
+            continue
+        if in_event and ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.split(";", 1)[0]] = value.replace("\\,", ",").replace("\\n", " ")
+
+    return sorted(events, key=lambda event: event["starts_at"])
 
 
 class ProjectInput(BaseModel):
@@ -540,6 +584,19 @@ app = FastAPI(title="Bodin Control Center API", lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/calendar/schedule")
+def calendar_schedule() -> dict[str, str | list[dict[str, str]]]:
+    url = os.environ.get("GOOGLE_CALENDAR_ICS_URL")
+    if not url:
+        return {"status": "Onbekend", "events": []}
+    try:
+        with urlopen(url, timeout=5) as response:
+            content = response.read().decode("utf-8")
+        return {"status": "Beschikbaar", "events": parse_ics_events(content)}
+    except (OSError, UnicodeDecodeError, URLError, ValueError):
+        return {"status": "Onbekend", "events": []}
 
 
 @app.get("/api/projects")

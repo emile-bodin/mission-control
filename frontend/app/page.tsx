@@ -1,42 +1,64 @@
 import Link from "next/link";
+import { LocalClock } from "./local-clock";
 
 type Project = { name: string; slug: string; display_name: string; product_key: string; status: string; personal_status: string };
-type StatusCard = { id: string; project_id: string | null; title: string; status: "OK" | "Let op" | "Actie nodig" | "Geblokkeerd" | "Onbekend"; interpretation: string; source_type: string; updated_at: string; resolved_at: string | null };
-type Action = { id: string; title: string; status: "Open" | "Bezig" | "Klaar" | "Later" };
-
-const pipeline = ["OK", "Let op", "Actie nodig", "Geblokkeerd", "Onbekend"] as const;
+type StatusCard = { id: string; project_id: string | null; title: string; status: "OK" | "Let op" | "Actie nodig" | "Geblokkeerd" | "Onbekend"; facts: string; interpretation: string; next_safe_step: string; source_type: string; updated_at: string; resolved_at: string | null };
+type Action = { id: string; title: string; status: "Open" | "Bezig" | "Klaar" | "Later"; priority: string; due_date: string | null; updated_at: string };
+type Asset = { id: string; name: string; type: string; status: string; notes: string };
+type CalendarEvent = { starts_at: string; summary: string };
+type Schedule = { status: string; events: CalendarEvent[] };
 
 export const dynamic = "force-dynamic";
 
 export default async function TodayPage() {
-  const [projectsResponse, cardsResponse, actionsResponse] = await Promise.all([
+  const [projectsResponse, cardsResponse, actionsResponse, assetsResponse, scheduleResponse] = await Promise.all([
     fetch("http://backend:8000/api/projects", { cache: "no-store" }),
     fetch("http://backend:8000/api/status-cards", { cache: "no-store" }),
-    fetch("http://backend:8000/api/actions", { cache: "no-store" })
+    fetch("http://backend:8000/api/actions", { cache: "no-store" }),
+    fetch("http://backend:8000/api/assets", { cache: "no-store" }),
+    fetch("http://backend:8000/api/calendar/schedule", { cache: "no-store" })
   ]);
   const projects: Project[] = projectsResponse.ok ? await projectsResponse.json() : [];
   const cards: StatusCard[] = cardsResponse.ok ? await cardsResponse.json() : [];
   const actions: Action[] = actionsResponse.ok ? await actionsResponse.json() : [];
-  const visibleProjects = projects.filter((project) => !project.name.startsWith("ARCHIVE —"));
+  const assets: Asset[] = assetsResponse.ok ? await assetsResponse.json() : [];
+  const schedule: Schedule = scheduleResponse.ok ? await scheduleResponse.json() : { status: "Onbekend", events: [] };
   const openCards = cards.filter((card) => !card.resolved_at);
-  const activeProjects = visibleProjects.filter((project) => project.status === "Active");
   const needsAttention = openCards.filter((card) => card.status === "Actie nodig" || card.status === "Geblokkeerd");
   const openActions = actions.filter((action) => action.status !== "Klaar");
-  const cardsByProject = new Map<string, number>();
-  openCards.forEach((card) => { if (card.project_id) cardsByProject.set(card.project_id, (cardsByProject.get(card.project_id) || 0) + 1); });
-  const recentCards = [...openCards].sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 4);
-  const backendOk = projectsResponse.ok && cardsResponse.ok && actionsResponse.ok;
+  const recentActivity = [
+    ...cards.map((card) => ({ id: `card-${card.id}`, href: `/status-cards/${card.id}`, title: card.title, detail: `Statuskaart · ${card.status}`, updatedAt: card.updated_at })),
+    ...actions.map((action) => ({ id: `action-${action.id}`, href: `/actions/${action.id}`, title: action.title, detail: `Actie · ${action.status}`, updatedAt: action.updated_at }))
+  ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5);
 
-  return <main className="mx-auto max-w-7xl px-5 py-8 sm:px-8">
-    <header className="flex flex-wrap items-end justify-between gap-4"><div><p className="font-mono text-xs uppercase tracking-[0.22em] text-cyan-300">Mission control</p><h1 className="mt-2 text-3xl font-semibold tracking-tight text-white sm:text-4xl">Today / local operating picture</h1></div><p className="max-w-md text-sm text-slate-400">Alleen lokale project-, statuskaart- en actierecords. Externe integraties: Disabled/Unknown.</p></header>
-    <section className="mt-7 grid gap-px overflow-hidden border border-slate-800 bg-slate-800 sm:grid-cols-2 xl:grid-cols-5" aria-label="Mission summary"><Summary label="Active projects" value={String(activeProjects.length)} detail={`${visibleProjects.length} geregistreerd`} /><Summary label="Open status cards" value={String(openCards.length)} detail="handmatig beheerd" /><Summary label="Open actions" value={String(openActions.length)} detail="handmatig beheerd" /><Summary label="Need attention" value={String(needsAttention.length)} detail="actie nodig + geblokkeerd" /><Summary label="Backend" value={backendOk ? "OK" : "Unknown"} detail="local API" /></section>
-    <section className="mt-7 grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-      <Panel title="Project Fleet Status" detail="Lokale projectrecords"><div className="divide-y divide-slate-800">{visibleProjects.map((project) => <Link className="flex items-center gap-3 py-3 text-sm hover:bg-slate-800/40" href={`/projects/${project.slug}`} key={project.slug}><span className="grid h-8 w-8 place-items-center border border-slate-700 bg-slate-950 font-mono text-[10px] text-cyan-200">{project.product_key}</span><span className="min-w-0 flex-1"><span className="block truncate font-medium text-slate-200">{project.display_name}</span><span className="text-xs text-slate-500">{project.status} · personal: {project.personal_status}</span></span><span className="font-mono text-xs text-slate-400">{cardsByProject.get(project.slug) || 0} open</span></Link>)}{!visibleProjects.length && <p className="py-4 text-sm text-slate-500">Geen lokale projectrecords geladen.</p>}</div></Panel>
-      <Panel title="Activity" detail="Recente lokale records"><div className="space-y-3">{recentCards.map((card) => <Link className="block border-l-2 border-cyan-400/50 bg-slate-950/50 px-3 py-2 hover:bg-slate-800" href={`/status-cards/${card.id}`} key={card.id}><p className="text-xs text-cyan-300">{card.status} · {card.source_type}</p><p className="mt-1 text-sm text-slate-200">{card.title}</p><p className="mt-1 text-xs text-slate-500">{card.interpretation}</p></Link>)}{!recentCards.length && <p className="text-sm text-slate-500">Geen open lokale statuskaarten.</p>}<div className="border-t border-slate-800 pt-3"><p className="text-xs uppercase tracking-[0.15em] text-slate-500">Open acties</p>{openActions.slice(0, 3).map((action) => <Link className="mt-2 block text-sm text-cyan-200 hover:underline" href={`/actions/${action.id}`} key={action.id}>{action.status} · {action.title}</Link>)}{!openActions.length && <p className="mt-2 text-sm text-slate-500">Geen open handmatige acties.</p>}</div></div></Panel>
+  return <main className="mx-auto max-w-7xl px-5 py-7 sm:px-8 lg:px-10">
+    <header className="flex flex-wrap items-end justify-between gap-5">
+      <div><p className="text-sm text-slate-400">Dit is wat vandaag aandacht vraagt.</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-white sm:text-4xl">Goedendag.</h1></div>
+      <div className="flex items-center gap-3"><span className="rounded-md border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-xs text-emerald-300">Local</span><LocalClock /></div>
+    </header>
+
+    <section className="mt-7 grid gap-4 xl:grid-cols-3">
+      <Panel eyebrow="Quick Capture"><div className="space-y-3"><textarea aria-label="Quick Capture" className="min-h-24 resize-none border-slate-700 bg-slate-950/60 text-slate-500" placeholder="Inbox-opslag Unknown — capture is nog niet beschikbaar." readOnly /><div className="flex items-center justify-between gap-3"><p className="text-xs text-slate-500">Nieuwe captures horen in Inbox. Lokale Inbox-opslag ontbreekt.</p><button className="shrink-0 rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-600" disabled>Opslaan</button></div></div></Panel>
+      <Panel eyebrow="Today / Focus"><div className="space-y-3">{openActions.slice(0, 4).map((action) => <Link className="flex gap-3 text-sm text-slate-200 hover:text-indigo-300" href={`/actions/${action.id}`} key={action.id}><span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border border-indigo-400" /><span>{action.title}<span className="block text-xs text-slate-500">{action.status} · {action.priority}</span></span></Link>)}{!openActions.length && <p className="text-sm text-slate-500">Geen open lokale acties.</p>}<Link className="inline-block text-sm text-indigo-300 hover:text-indigo-200" href="/actions">Alle acties →</Link></div></Panel>
+      <Panel eyebrow="Schedule" detail={schedule.status === "Beschikbaar" ? "Private ICS · read-only" : "Unknown/onbekend"}><div className="space-y-3">{schedule.events.slice(0, 4).map((event) => <div className="flex gap-4 text-sm" key={`${event.starts_at}-${event.summary}`}><time className="w-12 shrink-0 font-medium text-slate-300">{formatTime(event.starts_at)}</time><p className="text-slate-200">{event.summary}</p></div>)}{!schedule.events.length && <p className="text-sm text-slate-500">Agenda niet beschikbaar. Geen aannames gemaakt.</p>}</div></Panel>
     </section>
-    <section className="mt-7 border border-slate-800 bg-[#0b111c] p-5" aria-label="Status pipeline"><div className="flex items-baseline justify-between gap-3"><h2 className="font-semibold text-white">Status pipeline</h2><p className="text-xs text-slate-500">Open statuskaarten</p></div><div className="mt-4 grid gap-2 sm:grid-cols-5">{pipeline.map((status) => <div className="border border-slate-800 bg-slate-950/60 p-3" key={status}><p className="text-xs text-slate-500">{status}</p><p className="mt-2 font-mono text-2xl text-slate-100">{openCards.filter((card) => card.status === status).length}</p></div>)}</div></section>
+
+    <section className="mt-4 grid gap-4 xl:grid-cols-[1.45fr_1fr]">
+      <div className="space-y-4"><Panel eyebrow="Needs Attention" count={needsAttention.length}><div className="divide-y divide-slate-800">{needsAttention.map((card) => <Link className="block py-4 first:pt-0 last:pb-0 hover:bg-slate-900/40" href={`/status-cards/${card.id}`} key={card.id}><div className="flex items-start gap-3"><span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${card.status === "Geblokkeerd" ? "bg-red-400" : "bg-amber-400"}`} /><div className="min-w-0"><h3 className="font-medium text-slate-100">{card.title}</h3><p className="mt-2 text-sm text-slate-300"><span className="text-slate-500">Feit:</span> {card.facts}</p><p className="mt-1 text-sm text-slate-300"><span className="text-slate-500">Interpretatie:</span> {card.interpretation}</p><p className="mt-1 text-sm text-slate-300"><span className="text-slate-500">Volgende veilige stap:</span> {card.next_safe_step}</p></div></div></Link>)}{!needsAttention.length && <p className="text-sm text-slate-500">Geen lokale kaarten met Actie nodig of Geblokkeerd.</p>}</div></Panel>
+        <Panel eyebrow="Projects"><div className="divide-y divide-slate-800">{projects.slice(0, 5).map((project) => <Link className="flex items-center gap-3 py-3 text-sm first:pt-0 last:pb-0 hover:text-indigo-300" href={`/projects/${project.slug}`} key={project.slug}><span className="grid h-7 w-7 place-items-center rounded border border-slate-700 text-[10px] text-indigo-200">{project.product_key}</span><span className="min-w-0 flex-1"><span className="block truncate text-slate-200">{project.display_name}</span><span className="text-xs text-slate-500">{project.status} · {project.personal_status}</span></span></Link>)}{!projects.length && <p className="text-sm text-slate-500">Geen lokale projectrecords.</p>}</div><Link className="mt-4 inline-block text-sm text-indigo-300 hover:text-indigo-200" href="/projects">Alle projecten →</Link></Panel></div>
+      <div className="space-y-4"><Panel eyebrow="Inbox" count="Unknown"><p className="text-sm text-slate-500">Inbox-opslag is niet aanwezig in bestaande BCC-data. Nieuwe captures kunnen daarom niet veilig worden bewaard.</p></Panel>
+        <Panel eyebrow="Recent Activity"><div className="space-y-3">{recentActivity.map((item) => <Link className="block border-l border-slate-700 pl-3 hover:border-indigo-400" href={item.href} key={item.id}><p className="text-sm text-slate-200">{item.title}</p><p className="mt-0.5 text-xs text-slate-500">{item.detail}</p></Link>)}{!recentActivity.length && <p className="text-sm text-slate-500">Geen lokale activiteit beschikbaar.</p>}</div></Panel></div>
+    </section>
+
+    <section className="mt-4 grid gap-4 xl:grid-cols-2">
+      <Panel eyebrow="Homelab Status" detail="Ondersteunend"><div className="grid gap-2 sm:grid-cols-3">{assets.slice(0, 6).map((asset) => <Link className="rounded-md border border-slate-800 bg-slate-950/40 p-3 hover:border-slate-700" href={`/homelab/${asset.id}`} key={asset.id}><p className="truncate text-sm text-slate-200">{asset.name}</p><p className="mt-1 text-xs text-slate-500">{asset.status} · {asset.type}</p></Link>)}{!assets.length && <p className="text-sm text-slate-500">Geen lokale assets.</p>}</div><Link className="mt-4 inline-block text-sm text-indigo-300 hover:text-indigo-200" href="/homelab">Homelab bekijken →</Link></Panel>
+      <Panel eyebrow="Codex Runs" detail="Unknown/onbekend"><p className="text-sm text-slate-500">Geen lokale Codex-rungegevens of route beschikbaar.</p></Panel>
+    </section>
   </main>;
 }
 
-function Summary({ label, value, detail }: { label: string; value: string; detail: string }) { return <article className="bg-[#0b111c] p-5"><p className="text-xs uppercase tracking-[0.15em] text-slate-500">{label}</p><p className="mt-3 font-mono text-3xl text-white">{value}</p><p className="mt-1 text-xs text-slate-500">{detail}</p></article>; }
-function Panel({ title, detail, children }: { title: string; detail: string; children: React.ReactNode }) { return <section className="border border-slate-800 bg-[#0b111c] p-5"><div className="flex items-baseline justify-between gap-3"><h2 className="font-semibold text-white">{title}</h2><p className="text-xs text-slate-500">{detail}</p></div><div className="mt-4">{children}</div></section>; }
+function formatTime(value: string) { return new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
+
+function Panel({ eyebrow, detail, count, children }: { eyebrow: string; detail?: string; count?: number | string; children: React.ReactNode }) {
+  return <section className="rounded-lg border border-slate-800 bg-[#0c121c]/80 p-5"><header className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold uppercase tracking-wide text-slate-100">{eyebrow}</h2>{count !== undefined && <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-xs text-indigo-200">{count}</span>}{detail && <span className="text-xs text-slate-500">{detail}</span>}</header><div className="mt-5">{children}</div></section>;
+}
