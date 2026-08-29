@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { Project, ProjectForm } from "../project-form";
 import type { StatusCard } from "../../status-cards/status-card-form";
 
-type CodexRun = { id: string; linear_issue: string; branch: string; status: string; model: string; created_at: string };
+type CodexRun = { id: string; linear_issue: string; branch: string; status: string; model: string; profile: string; reasoning_level: string; session_type: string; created_at: string };
 
 const labels: Record<keyof Project, string> = {
   name: "Name", slug: "Slug", display_name: "Display name", product_key: "Product key", source_type: "Source type",
@@ -55,7 +55,7 @@ export default function ProjectDetailPage() {
       <section className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6">
         <div className="flex items-start justify-between gap-4"><h2 className="text-2xl font-semibold text-white">Laatste Codex-runs</h2><Link className="text-cyan-300 underline" href={`/codex-runs/new?project_id=${slug}`}>Nieuwe Codex-run</Link></div>
         <div className="mt-6 grid gap-3">
-          {runs.slice(0, 5).map((run) => <article className="rounded border border-slate-800 p-4" key={run.id}><p className="text-sm text-cyan-300">{run.status || "Unknown"} · {run.linear_issue || "Unknown"}</p><h3 className="mt-1 font-semibold text-white">{run.branch || "Unknown"}</h3><p className="mt-2 text-sm text-slate-300">{run.model || "Unknown"} · {run.created_at || "Unknown"}</p></article>)}
+          {runs.slice(0, 5).map((run) => <article className="rounded border border-slate-800 p-4" key={run.id}><p className="text-sm text-cyan-300">{run.status || "Unknown"} · {run.linear_issue || "Unknown"}</p><h3 className="mt-1 font-semibold text-white">{run.branch || "Unknown"}</h3><p className="mt-2 text-sm text-slate-300">Model: {run.model || "Unknown"} · Profile: {run.profile || "Unknown"}</p><p className="mt-1 text-sm text-slate-300">Reasoning: {run.reasoning_level || "Unknown"} · Session: {run.session_type || "Unknown"}</p></article>)}
           {!runs.length && <p className="text-slate-300">Geen Codex-runs.</p>}
         </div>
       </section>
