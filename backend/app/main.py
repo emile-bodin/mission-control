@@ -37,6 +37,13 @@ class ActionStatus(str, Enum):
     LATER = "Later"
 
 
+class AssetStatus(str, Enum):
+    UNKNOWN = "Onbekend"
+    OK = "OK"
+    ATTENTION = "Let op"
+    ERROR = "Fout"
+
+
 class ProjectInput(BaseModel):
     name: str = Field(min_length=1)
     slug: str = Field(min_length=1, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -125,6 +132,35 @@ class ActionPatch(BaseModel):
     project_id: str | None = None
     status_card_id: str | None = None
     due_date: date | None = None
+
+
+class AssetInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    type: str = "Unknown"
+    host: str = "Unknown"
+    address: str = "Unknown"
+    environment: str = "Unknown"
+    status: AssetStatus = AssetStatus.UNKNOWN
+    notes: str = ""
+
+
+class AssetPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1)
+    type: str | None = None
+    host: str | None = None
+    address: str | None = None
+    environment: str | None = None
+    status: AssetStatus | None = None
+    notes: str | None = None
+
+
+ASSET_COLUMNS = """
+    id, name, type, host, address, environment, status, notes, created_at, updated_at
+"""
 
 
 ACTION_COLUMNS = """
@@ -365,6 +401,20 @@ STATUS_CARD_SEEDS = [
 ]
 
 
+ASSET_SEEDS = [
+    {
+        "id": "seed-pulse",
+        "name": "Pulse",
+        "type": "Pulse status source",
+        "host": "Unknown",
+        "address": "https://pulse-2jfb7nxdj.connect2home.nl/",
+        "environment": "Homelab",
+        "status": "Onbekend",
+        "notes": "Bekende statusbron; geen API-integratie of externe check uitgevoerd.",
+    },
+]
+
+
 def get_connection() -> Generator[psycopg.Connection, None, None]:
     with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as connection:
         yield connection
@@ -451,6 +501,30 @@ def run_migrations() -> None:
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS assets (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    address TEXT NOT NULL,
+                    environment TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('Onbekend', 'OK', 'Let op', 'Fout')),
+                    notes TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.executemany(
+                """
+                INSERT INTO assets (id, name, type, host, address, environment, status, notes)
+                VALUES (%(id)s, %(name)s, %(type)s, %(host)s, %(address)s, %(environment)s, %(status)s, %(notes)s)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                ASSET_SEEDS,
             )
 
 
@@ -652,4 +726,52 @@ def update_action(action_id: str, action: ActionPatch, connection: psycopg.Conne
         updated = cursor.fetchone()
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action not found")
+    return updated
+
+
+@app.get("/api/assets")
+def list_assets(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {ASSET_COLUMNS} FROM assets ORDER BY name")
+        return cursor.fetchall()
+
+
+@app.get("/api/assets/{asset_id}")
+def get_asset(asset_id: str, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {ASSET_COLUMNS} FROM assets WHERE id = %s", (asset_id,))
+        asset = cursor.fetchone()
+    if asset is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
+    return asset
+
+
+@app.post("/api/assets", status_code=status.HTTP_201_CREATED)
+def create_asset(asset: AssetInput, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    values = asset.model_dump()
+    values["id"] = str(uuid4())
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO assets (id, name, type, host, address, environment, status, notes)
+            VALUES (%(id)s, %(name)s, %(type)s, %(host)s, %(address)s, %(environment)s, %(status)s, %(notes)s)
+            RETURNING {ASSET_COLUMNS}
+            """,
+            values,
+        )
+        return cursor.fetchone()
+
+
+@app.patch("/api/assets/{asset_id}")
+def update_asset(asset_id: str, asset: AssetPatch, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    changes = asset.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No asset fields supplied")
+    columns = ", ".join([*(f"{column} = %({column})s" for column in changes), "updated_at = CURRENT_TIMESTAMP"])
+    changes["id"] = asset_id
+    with connection.cursor() as cursor:
+        cursor.execute(f"UPDATE assets SET {columns} WHERE id = %(id)s RETURNING {ASSET_COLUMNS}", changes)
+        updated = cursor.fetchone()
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
     return updated

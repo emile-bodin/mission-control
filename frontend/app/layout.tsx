@@ -20,7 +20,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
               <Link className="whitespace-nowrap rounded px-3 py-2 text-sm text-slate-400 hover:bg-slate-800 hover:text-white" href="/status-cards">Status Cards</Link>
               <Link className="whitespace-nowrap rounded px-3 py-2 text-sm text-slate-400 hover:bg-slate-800 hover:text-white" href="/actions">Actions</Link>
               <span aria-disabled="true" className="block whitespace-nowrap rounded px-3 py-2 text-sm text-slate-600">Codex Runs <span className="ml-2 text-[10px] uppercase">Unknown</span></span>
-              <span aria-disabled="true" className="block whitespace-nowrap rounded px-3 py-2 text-sm text-slate-600">Homelab <span className="ml-2 text-[10px] uppercase">Unknown</span></span>
+              <Link className="whitespace-nowrap rounded px-3 py-2 text-sm text-slate-400 hover:bg-slate-800 hover:text-white" href="/homelab">Homelab</Link>
               <span aria-disabled="true" className="block whitespace-nowrap rounded px-3 py-2 text-sm text-slate-600">Settings <span className="ml-2 text-[10px] uppercase">Unknown</span></span>
             </nav>
             <div className="mt-8 hidden border-t border-slate-800 pt-5 text-xs text-slate-500 md:block">No external integrations enabled.</div>
