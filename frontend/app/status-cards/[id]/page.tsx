@@ -23,7 +23,7 @@ export default function StatusCardDetailPage() {
   return (
     <main className="mx-auto min-h-screen max-w-3xl px-6 py-12 sm:px-10">
       <Link className="text-cyan-300 underline" href="/status-cards">← Statuskaarten</Link>
-      <h1 className="mt-6 text-4xl font-semibold text-white">{card.title}</h1>
+      <div className="mt-6 flex items-start justify-between gap-4"><h1 className="text-4xl font-semibold text-white">{card.title}</h1><Link className="rounded bg-cyan-300 px-4 py-2 font-medium text-slate-950" href={`/actions/new?project_id=${card.project_id || ""}&status_card_id=${card.id}`}>Maak actie</Link></div>
       <dl className="mt-8 grid gap-3 rounded-2xl border border-slate-800 bg-slate-900 p-6">
         <div><dt className="text-sm text-slate-400">Status</dt><dd>{card.status}</dd></div>
         <div><dt className="text-sm text-slate-400">Feiten</dt><dd>{card.facts}</dd></div>

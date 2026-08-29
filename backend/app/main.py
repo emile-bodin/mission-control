@@ -1,6 +1,6 @@
 from collections.abc import Generator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 import os
 from uuid import uuid4
@@ -28,6 +28,13 @@ class StatusCardStatus(str, Enum):
     ACTION_NEEDED = "Actie nodig"
     BLOCKED = "Geblokkeerd"
     UNKNOWN = "Onbekend"
+
+
+class ActionStatus(str, Enum):
+    OPEN = "Open"
+    IN_PROGRESS = "Bezig"
+    DONE = "Klaar"
+    LATER = "Later"
 
 
 class ProjectInput(BaseModel):
@@ -94,6 +101,35 @@ class StatusCardPatch(BaseModel):
     source_reference: str | None = None
     last_checked_at: datetime | None = None
     resolved: bool | None = None
+
+
+class ActionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1)
+    type: str = "Unknown"
+    status: ActionStatus = ActionStatus.OPEN
+    priority: str = "Unknown"
+    project_id: str | None = None
+    status_card_id: str | None = None
+    due_date: date | None = None
+
+
+class ActionPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1)
+    type: str | None = None
+    status: ActionStatus | None = None
+    priority: str | None = None
+    project_id: str | None = None
+    status_card_id: str | None = None
+    due_date: date | None = None
+
+
+ACTION_COLUMNS = """
+    id, title, type, status, priority, project_id, status_card_id, due_date, created_at, updated_at
+"""
 
 
 STATUS_CARD_COLUMNS = """
@@ -400,6 +436,22 @@ def run_migrations() -> None:
                 """,
                 STATUS_CARD_SEEDS,
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS actions (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('Open', 'Bezig', 'Klaar', 'Later')),
+                    priority TEXT NOT NULL,
+                    project_id TEXT REFERENCES projects(slug) ON DELETE SET NULL,
+                    status_card_id TEXT REFERENCES status_cards(id) ON DELETE SET NULL,
+                    due_date DATE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
 
 
 @asynccontextmanager
@@ -548,4 +600,56 @@ def update_status_card(
         updated = cursor.fetchone()
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Status card not found")
+    return updated
+
+
+@app.get("/api/actions")
+def list_actions(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {ACTION_COLUMNS} FROM actions "
+            "ORDER BY CASE status WHEN 'Open' THEN 0 WHEN 'Bezig' THEN 1 WHEN 'Later' THEN 2 ELSE 3 END, "
+            "due_date NULLS LAST, updated_at DESC"
+        )
+        return cursor.fetchall()
+
+
+@app.get("/api/actions/{action_id}")
+def get_action(action_id: str, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {ACTION_COLUMNS} FROM actions WHERE id = %s", (action_id,))
+        action = cursor.fetchone()
+    if action is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action not found")
+    return action
+
+
+@app.post("/api/actions", status_code=status.HTTP_201_CREATED)
+def create_action(action: ActionInput, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    values = action.model_dump()
+    values["id"] = str(uuid4())
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO actions (id, title, type, status, priority, project_id, status_card_id, due_date)
+            VALUES (%(id)s, %(title)s, %(type)s, %(status)s, %(priority)s, %(project_id)s, %(status_card_id)s, %(due_date)s)
+            RETURNING {ACTION_COLUMNS}
+            """,
+            values,
+        )
+        return cursor.fetchone()
+
+
+@app.patch("/api/actions/{action_id}")
+def update_action(action_id: str, action: ActionPatch, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    changes = action.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No action fields supplied")
+    columns = ", ".join([*(f"{column} = %({column})s" for column in changes), "updated_at = CURRENT_TIMESTAMP"])
+    changes["id"] = action_id
+    with connection.cursor() as cursor:
+        cursor.execute(f"UPDATE actions SET {columns} WHERE id = %(id)s RETURNING {ACTION_COLUMNS}", changes)
+        updated = cursor.fetchone()
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Action not found")
     return updated
