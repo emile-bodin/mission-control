@@ -1,14 +1,16 @@
 from collections.abc import Generator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import Enum
+import hmac
 import os
+import secrets
 from urllib.error import URLError
 from urllib.request import urlopen
 from uuid import uuid4
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -200,6 +202,40 @@ class AssetPatch(BaseModel):
     environment: str | None = None
     status: AssetStatus | None = None
     notes: str | None = None
+
+
+class PairingChallengeCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    device_name: str = Field(min_length=1, max_length=120)
+
+
+class PairingChallengeResponse(BaseModel):
+    pairing_code: str
+    expires_at: datetime
+
+
+class PairingExchangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pairing_code: str = Field(min_length=1, max_length=512)
+
+
+class DeviceStatus(BaseModel):
+    id: str
+    device_name: str
+    paired_at: datetime
+    last_seen_at: datetime | None
+    revoked_at: datetime | None
+
+
+class PairingExchangeResponse(BaseModel):
+    device_token: str
+    device: DeviceStatus
+
+
+class DeviceListResponse(BaseModel):
+    devices: list[DeviceStatus]
 
 
 ASSET_COLUMNS = """
@@ -459,6 +495,97 @@ ASSET_SEEDS = [
 ]
 
 
+PAIRING_CODE_TTL = timedelta(minutes=10)
+PAIRING_RATE_LIMIT = 5
+PAIRING_RATE_WINDOW = timedelta(minutes=10)
+LAST_SEEN_UPDATE_INTERVAL = timedelta(minutes=5)
+
+
+def device_secret(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} must be configured")
+    return value
+
+
+def secret_hash(value: str) -> str:
+    return hmac.new(device_secret("DEVICE_TOKEN_PEPPER").encode(), value.encode(), "sha256").hexdigest()
+
+
+def generic_unauthorized() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unauthorized",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def require_admin_token(x_device_admin_token: str | None = Header(default=None)) -> None:
+    expected = device_secret("DEVICE_ADMIN_TOKEN")
+    if x_device_admin_token is None or not hmac.compare_digest(x_device_admin_token, expected):
+        raise generic_unauthorized()
+
+
+def bearer_token(authorization: str | None) -> str:
+    if authorization is None:
+        raise generic_unauthorized()
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token or token.strip() != token:
+        raise generic_unauthorized()
+    return token
+
+
+def trusted_client_ip(request: Request) -> str:
+    # HYD-181 strips this header unless its TCP peer is a configured reverse proxy.
+    forwarded = request.headers.get("x-mission-control-client-ip")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def create_pairing_challenge(connection: psycopg.Connection, device_name: str) -> dict:
+    pairing_code = secrets.token_urlsafe(32)
+    expires_at = datetime.now(UTC) + PAIRING_CODE_TTL
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO pairing_challenges (id, pairing_code_hash, device_name, expires_at)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (str(uuid4()), secret_hash(pairing_code), device_name, expires_at),
+        )
+    return {"pairing_code": pairing_code, "expires_at": expires_at}
+
+
+def record_pairing_failure(cursor: psycopg.Cursor, pairing_code_hash: str, client_ip_hash: str) -> bool:
+    cursor.execute(
+        """
+        INSERT INTO pairing_rate_limits (
+            pairing_code_hash, client_ip_hash, failed_attempts, window_started_at, last_failed_at, blocked_until
+        ) VALUES (%s, %s, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, NULL)
+        ON CONFLICT (pairing_code_hash, client_ip_hash) DO UPDATE SET
+            failed_attempts = CASE
+                WHEN pairing_rate_limits.window_started_at <= CURRENT_TIMESTAMP - INTERVAL '10 minutes' THEN 1
+                ELSE pairing_rate_limits.failed_attempts + 1
+            END,
+            window_started_at = CASE
+                WHEN pairing_rate_limits.window_started_at <= CURRENT_TIMESTAMP - INTERVAL '10 minutes' THEN CURRENT_TIMESTAMP
+                ELSE pairing_rate_limits.window_started_at
+            END,
+            last_failed_at = CURRENT_TIMESTAMP,
+            blocked_until = CASE
+                WHEN pairing_rate_limits.window_started_at <= CURRENT_TIMESTAMP - INTERVAL '10 minutes' THEN NULL
+                WHEN pairing_rate_limits.failed_attempts + 1 >= %s THEN CURRENT_TIMESTAMP + INTERVAL '10 minutes'
+                ELSE pairing_rate_limits.blocked_until
+            END
+        RETURNING blocked_until IS NOT NULL AND blocked_until > CURRENT_TIMESTAMP AS blocked
+        """,
+        (pairing_code_hash, client_ip_hash, PAIRING_RATE_LIMIT),
+    )
+    row = cursor.fetchone()
+    return row["blocked"] if isinstance(row, dict) else row[0]
+
+
 def get_connection() -> Generator[psycopg.Connection, None, None]:
     with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as connection:
         yield connection
@@ -570,6 +697,49 @@ def run_migrations() -> None:
                 """,
                 ASSET_SEEDS,
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pairing_challenges (
+                    id TEXT PRIMARY KEY,
+                    pairing_code_hash TEXT NOT NULL UNIQUE,
+                    device_name TEXT NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    used_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paired_devices (
+                    id TEXT PRIMARY KEY,
+                    device_name TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    paired_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMPTZ,
+                    revoked_at TIMESTAMPTZ
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pairing_rate_limits (
+                    pairing_code_hash TEXT NOT NULL,
+                    client_ip_hash TEXT NOT NULL,
+                    failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    window_started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_failed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    blocked_until TIMESTAMPTZ,
+                    PRIMARY KEY (pairing_code_hash, client_ip_hash)
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS pairing_challenges_expires_at_idx ON pairing_challenges (expires_at)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS paired_devices_active_token_idx ON paired_devices (token_hash) WHERE revoked_at IS NULL"
+            )
 
 
 @asynccontextmanager
@@ -584,6 +754,139 @@ app = FastAPI(title="Bodin Control Center API", lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post(
+    "/api/devices/pairing-challenges",
+    status_code=status.HTTP_201_CREATED,
+    response_model=PairingChallengeResponse,
+)
+def create_device_pairing_challenge(
+    payload: PairingChallengeCreate,
+    _: None = Depends(require_admin_token),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    return create_pairing_challenge(connection, payload.device_name)
+
+
+@app.post(
+    "/api/devices/pair",
+    status_code=status.HTTP_201_CREATED,
+    response_model=PairingExchangeResponse,
+)
+def exchange_pairing_challenge(
+    payload: PairingExchangeRequest,
+    request: Request,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    pairing_code_hash = secret_hash(payload.pairing_code)
+    client_ip_hash = secret_hash(trusted_client_ip(request))
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT blocked_until > CURRENT_TIMESTAMP AS blocked
+            FROM pairing_rate_limits
+            WHERE pairing_code_hash = %s AND client_ip_hash = %s
+            FOR UPDATE
+            """,
+            (pairing_code_hash, client_ip_hash),
+        )
+        rate_limit = cursor.fetchone()
+        blocked = rate_limit["blocked"] if isinstance(rate_limit, dict) else rate_limit[0] if rate_limit else False
+        if blocked:
+            connection.commit()
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Pairing unavailable")
+
+        cursor.execute(
+            "SELECT id, device_name, expires_at, used_at FROM pairing_challenges WHERE pairing_code_hash = %s FOR UPDATE",
+            (pairing_code_hash,),
+        )
+        challenge = cursor.fetchone()
+        if challenge is None or challenge["used_at"] is not None or challenge["expires_at"] <= datetime.now(UTC):
+            now_blocked = record_pairing_failure(cursor, pairing_code_hash, client_ip_hash)
+            connection.commit()
+            if now_blocked:
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Pairing unavailable")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Pairing failed")
+
+        device_token = secrets.token_urlsafe(32)
+        device_id = str(uuid4())
+        cursor.execute("UPDATE pairing_challenges SET used_at = CURRENT_TIMESTAMP WHERE id = %s", (challenge["id"],))
+        cursor.execute(
+            """
+            INSERT INTO paired_devices (id, device_name, token_hash, last_seen_at)
+            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING id, device_name, paired_at, last_seen_at, revoked_at
+            """,
+            (device_id, challenge["device_name"], secret_hash(device_token)),
+        )
+        device = cursor.fetchone()
+        cursor.execute(
+            "DELETE FROM pairing_rate_limits WHERE pairing_code_hash = %s AND client_ip_hash = %s",
+            (pairing_code_hash, client_ip_hash),
+        )
+    return {"device_token": device_token, "device": device}
+
+
+@app.get("/api/devices/me", response_model=DeviceStatus)
+def get_device_status(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    token_hash = secret_hash(bearer_token(authorization))
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, device_name, paired_at, last_seen_at, revoked_at
+            FROM paired_devices
+            WHERE token_hash = %s AND revoked_at IS NULL
+            """,
+            (token_hash,),
+        )
+        device = cursor.fetchone()
+        if device is None:
+            raise generic_unauthorized()
+        cursor.execute(
+            """
+            UPDATE paired_devices
+            SET last_seen_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+              AND (last_seen_at IS NULL OR last_seen_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes')
+            """,
+            (device["id"],),
+        )
+    return device
+
+
+@app.get("/api/devices", response_model=DeviceListResponse)
+def list_devices(
+    _: None = Depends(require_admin_token),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, device_name, paired_at, last_seen_at, revoked_at
+            FROM paired_devices
+            ORDER BY paired_at DESC
+            """
+        )
+        return {"devices": cursor.fetchall()}
+
+
+@app.post("/api/devices/{device_id}/revoke", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_device(
+    device_id: str,
+    _: None = Depends(require_admin_token),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> Response:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE paired_devices SET revoked_at = CURRENT_TIMESTAMP WHERE id = %s AND revoked_at IS NULL",
+            (device_id,),
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/api/calendar/schedule")

@@ -3,7 +3,10 @@ services:
     build:
       context: ./frontend
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${FRONTEND_PORT:-3100}:3000"
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL in .env}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:?Set TRUSTED_PROXY_CIDRS in .env}
     depends_on:
       backend:
         condition: service_started
@@ -14,8 +17,10 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-bodin}:${POSTGRES_PASSWORD:-replace-with-local-password}@db:5432/${POSTGRES_DB:-bodin}
       GOOGLE_CALENDAR_ICS_URL: ${GOOGLE_CALENDAR_ICS_URL:-}
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      PULSE_BASE_URL: ${PULSE_BASE_URL:-}
+      PULSE_API_TOKEN: ${PULSE_API_TOKEN:-}
+      DEVICE_TOKEN_PEPPER: ${DEVICE_TOKEN_PEPPER:?Set DEVICE_TOKEN_PEPPER in .env}
+      DEVICE_ADMIN_TOKEN: ${DEVICE_ADMIN_TOKEN:?Set DEVICE_ADMIN_TOKEN in .env}
     depends_on:
       db:
         condition: service_healthy
