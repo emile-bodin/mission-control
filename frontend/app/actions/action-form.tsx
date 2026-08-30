@@ -17,6 +17,7 @@ export type Action = {
 };
 
 const statuses: Action["status"][] = ["Open", "Bezig", "Klaar", "Later"];
+const priorities = ["Hoog", "Normaal", "Laag"];
 
 function payload(form: HTMLFormElement) {
   const values: Record<string, string | null> = {};
@@ -51,7 +52,7 @@ export function ActionForm({ action, projectId, statusCardId }: { action?: Actio
       <label>Titel<input name="title" required defaultValue={action?.title} /></label>
       <label>Type<input name="type" required defaultValue={action?.type || "Unknown"} /></label>
       <label>Status<select name="status" defaultValue={action?.status || "Open"}>{statuses.map((status) => <option key={status}>{status}</option>)}</select></label>
-      <label>Prioriteit<input name="priority" required defaultValue={action?.priority || "Unknown"} /></label>
+      <label>Prioriteit<select name="priority" defaultValue={action?.priority || "Normaal"}>{action?.priority && !priorities.includes(action.priority) && <option value={action.priority}>{action.priority}</option>}{priorities.map((priority) => <option key={priority}>{priority}</option>)}</select></label>
       <label>Project slug (optioneel)<input name="project_id" defaultValue={action?.project_id ?? projectId ?? ""} /></label>
       <label>Statuskaart-ID (optioneel)<input name="status_card_id" defaultValue={action?.status_card_id ?? statusCardId ?? ""} /></label>
       <label>Due date (optioneel)<input name="due_date" type="date" defaultValue={action?.due_date || ""} /></label>

@@ -89,7 +89,7 @@ def pulse_homelab() -> dict:
     return {"available": True, "status": pulse_value(summary.get("lastUpdate")), "resources": sorted(resources, key=lambda resource: (resource["type"], resource["name"])), "docker_hosts": docker_hosts, "last_updated_at": pulse_value(summary.get("lastUpdate"))}
 
 
-def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str, str]]:
+def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str, str | bool]]:
     if "BEGIN:VCALENDAR" not in content:
         raise ValueError("Invalid ICS calendar")
 
@@ -103,6 +103,13 @@ def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str
     events: list[dict[str, str]] = []
     fields: dict[str, str] = {}
     in_event = False
+
+    def parse_ics_time(value: str) -> datetime:
+        normalized = value.rstrip("Z")
+        pattern = "%Y%m%d" if len(normalized) == 8 else "%Y%m%dT%H%M%S" if len(normalized) == 15 else "%Y%m%dT%H%M"
+        parsed = datetime.strptime(normalized, pattern)
+        return parsed.replace(tzinfo=UTC).astimezone().replace(tzinfo=None) if value.endswith("Z") else parsed
+
     for line in unfolded:
         if line == "BEGIN:VEVENT":
             fields = {}
@@ -110,16 +117,16 @@ def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str
             continue
         if line == "END:VEVENT" and in_event:
             starts_at = fields.get("DTSTART")
+            ends_at = fields.get("DTEND")
             summary = fields.get("SUMMARY")
             if starts_at and summary:
                 try:
-                    value = starts_at.rstrip("Z")
-                    pattern = "%Y%m%d" if len(value) == 8 else "%Y%m%dT%H%M%S" if len(value) == 15 else "%Y%m%dT%H%M"
-                    start = datetime.strptime(value, pattern)
-                    if starts_at.endswith("Z"):
-                        start = start.replace(tzinfo=UTC).astimezone().replace(tzinfo=None)
+                    start = parse_ics_time(starts_at)
                     if start >= (now or datetime.now()):
-                        events.append({"starts_at": start.isoformat(timespec="minutes"), "summary": summary})
+                        event = {"starts_at": start.isoformat(timespec="minutes"), "summary": summary, "all_day": len(starts_at.rstrip("Z")) == 8}
+                        if ends_at:
+                            event["ends_at"] = parse_ics_time(ends_at).isoformat(timespec="minutes")
+                        events.append(event)
                 except ValueError:
                     pass
             in_event = False
@@ -243,6 +250,12 @@ class ActionPatch(BaseModel):
     due_date: date | None = None
 
 
+class InboxItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=5000)
+
+
 class AssetInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -273,7 +286,12 @@ ASSET_COLUMNS = """
 
 
 ACTION_COLUMNS = """
-    id, title, type, status, priority, project_id, status_card_id, due_date, created_at, updated_at
+id, title, type, status, priority, project_id, status_card_id, due_date, created_at, updated_at
+"""
+
+
+INBOX_ITEM_COLUMNS = """
+id, content, action_id, created_at
 """
 
 
@@ -620,6 +638,19 @@ def run_migrations() -> None:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS inbox_items (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    action_id TEXT REFERENCES actions(id) ON DELETE SET NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                "ALTER TABLE inbox_items ADD COLUMN IF NOT EXISTS action_id TEXT REFERENCES actions(id) ON DELETE SET NULL"
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS codex_runs (
                     id TEXT PRIMARY KEY,
                     project_id TEXT NOT NULL REFERENCES projects(slug) ON DELETE RESTRICT,
@@ -684,7 +715,7 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/api/calendar/schedule")
-def calendar_schedule() -> dict[str, str | list[dict[str, str]]]:
+def calendar_schedule() -> dict[str, str | list[dict[str, str | bool]]]:
     url = os.environ.get("GOOGLE_CALENDAR_ICS_URL")
     if not url:
         return {"status": "Onbekend", "events": []}
@@ -887,6 +918,49 @@ def list_actions(connection: psycopg.Connection = Depends(get_connection)) -> li
             "due_date NULLS LAST, updated_at DESC"
         )
         return cursor.fetchall()
+
+
+@app.get("/api/inbox")
+def list_inbox_items(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {INBOX_ITEM_COLUMNS} FROM inbox_items WHERE action_id IS NULL ORDER BY created_at DESC")
+        return cursor.fetchall()
+
+
+@app.post("/api/inbox", status_code=status.HTTP_201_CREATED)
+def create_inbox_item(item: InboxItemInput, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    content = item.content.strip()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Inbox content is required")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"INSERT INTO inbox_items (id, content) VALUES (%s, %s) RETURNING {INBOX_ITEM_COLUMNS}",
+            (str(uuid4()), content),
+        )
+        return cursor.fetchone()
+
+
+@app.post("/api/inbox/{item_id}/promote", status_code=status.HTTP_201_CREATED)
+def promote_inbox_item(item_id: str, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT content, action_id FROM inbox_items WHERE id = %s FOR UPDATE", (item_id,))
+        item = cursor.fetchone()
+        if item is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbox item not found")
+        if item["action_id"] is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Inbox item already promoted")
+        action_id = str(uuid4())
+        cursor.execute(
+            f"""
+            INSERT INTO actions (id, title, type, status, priority)
+            VALUES (%s, %s, 'Inbox', 'Open', 'Normaal')
+            RETURNING {ACTION_COLUMNS}
+            """,
+            (action_id, item["content"]),
+        )
+        action = cursor.fetchone()
+        cursor.execute("UPDATE inbox_items SET action_id = %s WHERE id = %s", (action_id, item_id))
+        return action
 
 
 @app.get("/api/actions/{action_id}")

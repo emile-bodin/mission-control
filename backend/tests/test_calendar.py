@@ -14,10 +14,18 @@ class CalendarParserTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                {"starts_at": "2099-01-02T10:30", "summary": "Planning, personal"},
-                {"starts_at": "2099-01-03T12:00", "summary": "Folded calendaritem"},
+                {"starts_at": "2099-01-02T10:30", "summary": "Planning, personal", "all_day": False},
+                {"starts_at": "2099-01-03T12:00", "summary": "Folded calendaritem", "all_day": False},
             ],
         )
+
+    def test_includes_end_time(self):
+        events = parse_ics_events(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nDTSTART:20990102T103000\nDTEND:20990102T110000\nSUMMARY:Appointment\nEND:VEVENT\nEND:VCALENDAR",
+            now=datetime(2099, 1, 1),
+        )
+
+        self.assertEqual(events[0]["ends_at"], "2099-01-02T11:00")
 
     def test_rejects_invalid_calendar(self):
         with self.assertRaises(ValueError):

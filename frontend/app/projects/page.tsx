@@ -9,9 +9,9 @@ export default async function ProjectsPage() {
   const projects: Project[] = await response.json();
 
   return (
-    <main className="mx-auto min-h-screen max-w-5xl px-6 py-12 sm:px-10">
+    <main className="bcc-shell mx-auto min-h-screen">
       <header className="flex items-start justify-between gap-4">
-        <div><p className="text-sm font-medium uppercase tracking-[0.2em] text-cyan-300">Bodin Control Center</p><h1 className="mt-3 text-4xl font-semibold text-white">Projecten</h1></div>
+        <div><Link className="text-cyan-300 underline" href="/">← Vandaag</Link><p className="mt-3 text-sm font-medium uppercase tracking-[0.2em] text-cyan-300">Bodin Control Center</p><h1 className="mt-3 text-4xl font-semibold text-white">Projecten</h1></div>
         <Link className="rounded bg-cyan-300 px-4 py-2 font-medium text-slate-950" href="/projects/new">Nieuw project</Link>
       </header>
       <section className="mt-8 grid gap-4" aria-label="Projectenlijst">

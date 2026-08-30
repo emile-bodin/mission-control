@@ -17,3 +17,47 @@ input, select, textarea {
 textarea {
   @apply min-h-24;
 }
+
+main.bcc-shell {
+  max-width: 80rem;
+  padding: 1.25rem;
+}
+
+main.bcc-shell h1 {
+  margin-top: 0;
+  font-size: 1.875rem;
+  line-height: 2.25rem;
+  letter-spacing: -0.025em;
+}
+
+main.bcc-shell > header,
+main.bcc-shell > h1 {
+  margin-bottom: 1rem;
+}
+
+main.bcc-shell .mt-8 {
+  margin-top: 1rem;
+}
+
+main.bcc-shell .rounded-2xl,
+main.bcc-shell .rounded-xl {
+  border-radius: 0.5rem;
+}
+
+main.bcc-shell .bg-slate-900,
+main.bcc-shell .bg-slate-950\/50 {
+  background-color: rgb(12 18 28 / 0.8);
+}
+
+main.bcc-shell .p-5,
+main.bcc-shell .p-6 {
+  padding: 1rem;
+}
+
+main.bcc-shell .text-cyan-300 {
+  color: rgb(165 180 252);
+}
+
+main.bcc-shell .bg-cyan-300 {
+  background-color: rgb(165 180 252);
+}

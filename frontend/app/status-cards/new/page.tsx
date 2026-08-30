@@ -9,7 +9,7 @@ export default function NewStatusCardPage() {
 
   useEffect(() => setProjectId(new URLSearchParams(window.location.search).get("project_id")), []);
   return (
-    <main className="mx-auto min-h-screen max-w-3xl px-6 py-12 sm:px-10">
+    <main className="bcc-shell mx-auto min-h-screen">
       <Link className="text-cyan-300 underline" href="/status-cards">← Statuskaarten</Link>
       <h1 className="mt-6 text-4xl font-semibold text-white">Nieuwe statuskaart</h1>
       <div className="mt-8 rounded-2xl border border-slate-800 bg-slate-900 p-6"><StatusCardForm key={projectId ?? "new"} projectId={projectId} /></div>
