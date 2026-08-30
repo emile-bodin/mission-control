@@ -3,7 +3,10 @@ services:
     build:
       context: ./frontend
     ports:
-      - "${FRONTEND_PORT:-3000}:3000"
+      - "${FRONTEND_PORT:-3100}:3000"
+    environment:
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL in .env}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:?Set TRUSTED_PROXY_CIDRS in .env}
     depends_on:
       backend:
         condition: service_started
@@ -16,8 +19,6 @@ services:
       GOOGLE_CALENDAR_ICS_URL: ${GOOGLE_CALENDAR_ICS_URL:-}
       PULSE_BASE_URL: ${PULSE_BASE_URL:-}
       PULSE_API_TOKEN: ${PULSE_API_TOKEN:-}
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
