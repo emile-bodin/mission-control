@@ -8,6 +8,7 @@ import secrets
 from urllib.error import URLError
 from urllib.request import urlopen
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
@@ -48,6 +49,9 @@ class AssetStatus(str, Enum):
     ERROR = "Fout"
 
 
+PRODUCT_TIMEZONE = ZoneInfo("Europe/Amsterdam")
+
+
 def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str, str]]:
     if "BEGIN:VCALENDAR" not in content:
         raise ValueError("Invalid ICS calendar")
@@ -76,7 +80,7 @@ def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str
                     pattern = "%Y%m%d" if len(value) == 8 else "%Y%m%dT%H%M%S" if len(value) == 15 else "%Y%m%dT%H%M"
                     start = datetime.strptime(value, pattern)
                     if starts_at.endswith("Z"):
-                        start = start.replace(tzinfo=UTC).astimezone().replace(tzinfo=None)
+                        start = start.replace(tzinfo=UTC).astimezone(PRODUCT_TIMEZONE).replace(tzinfo=None)
                     if start >= (now or datetime.now()):
                         events.append({"starts_at": start.isoformat(timespec="minutes"), "summary": summary})
                 except ValueError:

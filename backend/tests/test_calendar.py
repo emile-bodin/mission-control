@@ -15,7 +15,7 @@ class CalendarParserTests(unittest.TestCase):
             events,
             [
                 {"starts_at": "2099-01-02T10:30", "summary": "Planning, personal"},
-                {"starts_at": "2099-01-03T12:00", "summary": "Folded calendaritem"},
+                {"starts_at": "2099-01-03T13:00", "summary": "Folded calendaritem"},
             ],
         )
 
