@@ -14,7 +14,10 @@ const nextConfig = {
     }];
   },
   async rewrites() {
-    return [{ source: "/api/:path*", destination: "http://backend:8000/api/:path*" }];
+    return [
+      { source: "/health", destination: "http://backend:8000/health" },
+      { source: "/api/:path*", destination: "http://backend:8000/api/:path*" }
+    ];
   }
 };
 
