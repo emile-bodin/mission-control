@@ -15,26 +15,31 @@ import javax.crypto.spec.GCMParameterSpec
 internal class SecureTokenStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
-    fun read(): String? = try {
-        val encryptedToken = preferences.getString(CIPHERTEXT_KEY, null) ?: return null
+    fun read(): String? {
+        val encryptedToken = preferences.getString(CIPHERTEXT_KEY, null)
         val initializationVector = preferences.getString(INITIALIZATION_VECTOR_KEY, null)
-        if (initializationVector == null) {
-            clear()
+        if (encryptedToken == null || initializationVector == null) {
+            if (encryptedToken != null || initializationVector != null) {
+                clear()
+            }
             return null
         }
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(
-            Cipher.DECRYPT_MODE,
-            secretKey(),
-            GCMParameterSpec(GCM_TAG_LENGTH_BITS, Base64.decode(initializationVector, Base64.NO_WRAP)),
-        )
-        String(cipher.doFinal(Base64.decode(encryptedToken, Base64.NO_WRAP)), StandardCharsets.UTF_8)
-    } catch (_: GeneralSecurityException) {
-        clear()
-        null
-    } catch (_: IllegalArgumentException) {
-        clear()
-        null
+
+        return try {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                secretKey(),
+                GCMParameterSpec(GCM_TAG_LENGTH_BITS, Base64.decode(initializationVector, Base64.NO_WRAP)),
+            )
+            String(cipher.doFinal(Base64.decode(encryptedToken, Base64.NO_WRAP)), StandardCharsets.UTF_8)
+        } catch (_: GeneralSecurityException) {
+            clear()
+            null
+        } catch (_: IllegalArgumentException) {
+            clear()
+            null
+        }
     }
 
     fun save(token: String): Boolean = try {
