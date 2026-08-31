@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Mission Control</string>
+    <string name="pairing_code_label">Pairingcode</string>
+    <string name="pairing_code_hint">Plak een eenmalige pairingcode</string>
+    <string name="pair_button">Koppelen</string>
+    <string name="check_button">Status controleren</string>
+</resources>
