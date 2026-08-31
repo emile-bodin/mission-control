@@ -1,6 +1,7 @@
 package nl.connect2home.missioncontrol.companion
 
 import org.json.JSONException
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URL
@@ -67,6 +68,37 @@ internal class MissionControlClient {
         StatusResult.BackendUnavailable
     }
 
+    fun sync(token: String, records: List<HealthSyncRecord>): UploadResult = try {
+        val connection = connection("/api/v1/health/sync", "POST")
+        connection.doOutput = true
+        connection.setRequestProperty("Authorization", "Bearer $token")
+        connection.setRequestProperty("Content-Type", "application/json")
+        connection.outputStream.bufferedWriter().use { writer ->
+            writer.write(HealthSyncEngine.batchJson(records))
+        }
+
+        when (connection.responseCode) {
+            200 -> {
+                val response = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+                val statuses = response.getJSONArray("results").statuses()
+                connection.disconnect()
+                UploadResult.Completed(statuses)
+            }
+            401 -> {
+                connection.disconnect()
+                UploadResult.AuthInvalid
+            }
+            else -> {
+                connection.disconnect()
+                UploadResult.Unavailable("Synchronisatiebackend niet bereikbaar.")
+            }
+        }
+    } catch (_: IOException) {
+        UploadResult.Unavailable("Synchronisatiebackend niet bereikbaar.")
+    } catch (_: JSONException) {
+        UploadResult.Unavailable("Synchronisatieantwoord is ongeldig.")
+    }
+
     private fun connection(path: String, method: String): HttpsURLConnection =
         (URL("$BASE_URL$path").openConnection() as HttpsURLConnection).apply {
             requestMethod = method
@@ -79,6 +111,10 @@ internal class MissionControlClient {
         const val BASE_URL = "https://hera.connect2home.nl"
         const val TIMEOUT_MILLIS = 10_000
     }
+}
+
+private fun JSONArray.statuses(): List<String> = buildList {
+    for (index in 0 until length()) add(getJSONObject(index).getString("status"))
 }
 
 internal sealed interface PairingResult {

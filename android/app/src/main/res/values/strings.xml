@@ -4,4 +4,7 @@
     <string name="pairing_code_hint">Plak een eenmalige pairingcode</string>
     <string name="pair_button">Koppelen</string>
     <string name="check_button">Status controleren</string>
+    <string name="health_section">Health Connect</string>
+    <string name="health_permission_button">Toestemming geven</string>
+    <string name="health_sync_button">Nu synchroniseren</string>
 </resources>
