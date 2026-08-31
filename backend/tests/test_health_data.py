@@ -142,6 +142,20 @@ class HealthDataTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(len([weight for weight in weights if weight["source"] == self.external_source]), 1)
 
+        activity = self.activity_payload(self.external_source, "activity-1")
+        status, created_activity = self.request("POST", "/api/health/activities", activity)
+        self.assertEqual(status, 201)
+        activity["distance_value"] = 1500
+        activity["distance_unit"] = "m"
+        status, repeated_activity = self.request("POST", "/api/health/activities", activity)
+        self.assertEqual(status, 200)
+        self.assertEqual(repeated_activity["id"], created_activity["id"])
+        self.assertEqual(repeated_activity["distance_meters"], 1500)
+
+        status, activities = self.request("GET", "/api/health/activities")
+        self.assertEqual(status, 200)
+        self.assertEqual(len([activity for activity in activities if activity["source"] == self.external_source]), 1)
+
     def test_manual_and_external_activity_records_are_distinct(self):
         status, manual = self.request("POST", "/api/health/activities", self.activity_payload(self.manual_source))
         self.assertEqual(status, 201)
@@ -170,6 +184,10 @@ class HealthDataTests(unittest.TestCase):
 
         invalid_activity = self.activity_payload(self.manual_source)
         invalid_activity["distance_value"] = -1
+        self.assertEqual(self.request("POST", "/api/health/activities", invalid_activity)[0], 422)
+
+        invalid_activity = self.activity_payload(self.manual_source)
+        invalid_activity["energy_value"] = -1
         self.assertEqual(self.request("POST", "/api/health/activities", invalid_activity)[0], 422)
 
 
