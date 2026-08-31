@@ -3,8 +3,10 @@ from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 import hmac
+import json
 import os
 import secrets
+from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
 from uuid import uuid4
@@ -13,7 +15,7 @@ from zoneinfo import ZoneInfo
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from psycopg.rows import dict_row
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ProjectStatus(str, Enum):
@@ -208,6 +210,111 @@ class AssetPatch(BaseModel):
     notes: str | None = None
 
 
+class WeightUnit(str, Enum):
+    KILOGRAM = "kg"
+    POUND = "lb"
+
+
+class DistanceUnit(str, Enum):
+    METER = "m"
+    KILOMETER = "km"
+
+
+class EnergyUnit(str, Enum):
+    KILOCALORIE = "kcal"
+    KILOJOULE = "kj"
+
+
+def normalize_health_timestamp(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Timestamp must include a timezone")
+    return value.astimezone(UTC)
+
+
+class WeightInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    measured_at: datetime
+    value: float = Field(gt=0)
+    unit: WeightUnit
+    source: str = Field(min_length=1, max_length=100)
+    external_record_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("measured_at")
+    @classmethod
+    def normalize_measured_at(cls, value: datetime) -> datetime:
+        return normalize_health_timestamp(value)
+
+
+class WeightPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    measured_at: datetime | None = None
+    value: float | None = Field(default=None, gt=0)
+    unit: WeightUnit | None = None
+    source: str | None = Field(default=None, min_length=1, max_length=100)
+    external_record_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("measured_at")
+    @classmethod
+    def normalize_measured_at(cls, value: datetime | None) -> datetime | None:
+        return normalize_health_timestamp(value) if value is not None else value
+
+
+class ActivityInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activity_type: str = Field(min_length=1, max_length=100)
+    started_at: datetime
+    ended_at: datetime
+    duration_seconds: int = Field(gt=0)
+    distance_value: float | None = Field(default=None, ge=0)
+    distance_unit: DistanceUnit | None = None
+    energy_value: float | None = Field(default=None, ge=0)
+    energy_unit: EnergyUnit | None = None
+    source: str = Field(min_length=1, max_length=100)
+    external_record_id: str | None = Field(default=None, min_length=1, max_length=200)
+    source_metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("started_at", "ended_at")
+    @classmethod
+    def normalize_activity_time(cls, value: datetime) -> datetime:
+        return normalize_health_timestamp(value)
+
+    @model_validator(mode="after")
+    def validate_activity(self) -> "ActivityInput":
+        if self.ended_at <= self.started_at:
+            raise ValueError("Activity end must be after start")
+        if self.duration_seconds != (self.ended_at - self.started_at).total_seconds():
+            raise ValueError("Activity duration must equal the interval between start and end")
+        if (self.distance_value is None) != (self.distance_unit is None):
+            raise ValueError("Distance value and unit must be supplied together")
+        if (self.energy_value is None) != (self.energy_unit is None):
+            raise ValueError("Energy value and unit must be supplied together")
+        return self
+
+
+class ActivityPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    activity_type: str | None = Field(default=None, min_length=1, max_length=100)
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    duration_seconds: int | None = Field(default=None, gt=0)
+    distance_value: float | None = Field(default=None, ge=0)
+    distance_unit: DistanceUnit | None = None
+    energy_value: float | None = Field(default=None, ge=0)
+    energy_unit: EnergyUnit | None = None
+    source: str | None = Field(default=None, min_length=1, max_length=100)
+    external_record_id: str | None = Field(default=None, min_length=1, max_length=200)
+    source_metadata: dict[str, Any] | None = None
+
+    @field_validator("started_at", "ended_at")
+    @classmethod
+    def normalize_activity_time(cls, value: datetime | None) -> datetime | None:
+        return normalize_health_timestamp(value) if value is not None else value
+
+
 class PairingChallengeCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -249,6 +356,16 @@ ASSET_COLUMNS = """
 
 ACTION_COLUMNS = """
     id, title, type, status, priority, project_id, status_card_id, due_date, created_at, updated_at
+"""
+
+HEALTH_WEIGHT_COLUMNS = """
+    id, measured_at, normalized_kg, source_value, source_unit, source, external_record_id, created_at, updated_at
+"""
+
+HEALTH_ACTIVITY_COLUMNS = """
+    id, activity_type, started_at, ended_at, duration_seconds, distance_meters, source_distance_value,
+    source_distance_unit, energy_kilocalories, source_energy_value, source_energy_unit, source,
+    external_record_id, source_metadata, created_at, updated_at
 """
 
 
@@ -744,6 +861,63 @@ def run_migrations() -> None:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS paired_devices_active_token_idx ON paired_devices (token_hash) WHERE revoked_at IS NULL"
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS health_weights (
+                    id TEXT PRIMARY KEY,
+                    measured_at TIMESTAMPTZ NOT NULL,
+                    normalized_kg DOUBLE PRECISION NOT NULL CHECK (normalized_kg > 0),
+                    source_value DOUBLE PRECISION NOT NULL CHECK (source_value > 0),
+                    source_unit TEXT NOT NULL CHECK (source_unit IN ('kg', 'lb')),
+                    source TEXT NOT NULL,
+                    external_record_id TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS health_activities (
+                    id TEXT PRIMARY KEY,
+                    activity_type TEXT NOT NULL,
+                    started_at TIMESTAMPTZ NOT NULL,
+                    ended_at TIMESTAMPTZ NOT NULL,
+                    duration_seconds INTEGER NOT NULL CHECK (duration_seconds > 0),
+                    distance_meters DOUBLE PRECISION CHECK (distance_meters >= 0),
+                    source_distance_value DOUBLE PRECISION CHECK (source_distance_value >= 0),
+                    source_distance_unit TEXT CHECK (source_distance_unit IN ('m', 'km')),
+                    energy_kilocalories DOUBLE PRECISION CHECK (energy_kilocalories >= 0),
+                    source_energy_value DOUBLE PRECISION CHECK (source_energy_value >= 0),
+                    source_energy_unit TEXT CHECK (source_energy_unit IN ('kcal', 'kj')),
+                    source TEXT NOT NULL,
+                    external_record_id TEXT,
+                    source_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (ended_at > started_at),
+                    CHECK (duration_seconds = EXTRACT(EPOCH FROM ended_at - started_at)::INTEGER),
+                    CHECK ((distance_meters IS NULL) = (source_distance_value IS NULL)),
+                    CHECK ((distance_meters IS NULL) = (source_distance_unit IS NULL)),
+                    CHECK ((energy_kilocalories IS NULL) = (source_energy_value IS NULL)),
+                    CHECK ((energy_kilocalories IS NULL) = (source_energy_unit IS NULL))
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS health_weights_source_external_record_id_idx
+                ON health_weights (source, external_record_id)
+                WHERE external_record_id IS NOT NULL
+                """
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS health_activities_source_external_record_id_idx
+                ON health_activities (source, external_record_id)
+                WHERE external_record_id IS NOT NULL
+                """
+            )
 
 
 @asynccontextmanager
@@ -904,6 +1078,256 @@ def calendar_schedule() -> dict[str, str | list[dict[str, str]]]:
         return {"status": "Beschikbaar", "events": parse_ics_events(content)}
     except (OSError, UnicodeDecodeError, URLError, ValueError):
         return {"status": "Onbekend", "events": []}
+
+
+def weight_values(weight: WeightInput) -> dict[str, Any]:
+    values = weight.model_dump()
+    values["source_value"] = values.pop("value")
+    values["source_unit"] = values.pop("unit").value
+    values["normalized_kg"] = round(
+        values["source_value"] if values["source_unit"] == "kg" else values["source_value"] * 0.45359237,
+        6,
+    )
+    return values
+
+
+def activity_values(activity: ActivityInput) -> dict[str, Any]:
+    values = activity.model_dump()
+    distance_unit = values.pop("distance_unit")
+    energy_unit = values.pop("energy_unit")
+    values["source_distance_value"] = values.pop("distance_value")
+    values["source_distance_unit"] = distance_unit.value if distance_unit else None
+    values["distance_meters"] = (
+        values["source_distance_value"] * (1000 if values["source_distance_unit"] == "km" else 1)
+        if values["source_distance_value"] is not None
+        else None
+    )
+    values["source_energy_value"] = values.pop("energy_value")
+    values["source_energy_unit"] = energy_unit.value if energy_unit else None
+    values["energy_kilocalories"] = (
+        values["source_energy_value"] * 0.239005736 if values["source_energy_unit"] == "kj" else values["source_energy_value"]
+    )
+    values["source_metadata"] = json.dumps(values["source_metadata"])
+    return values
+
+
+def weight_input_from_record(record: dict) -> dict[str, Any]:
+    return {
+        "measured_at": record["measured_at"],
+        "value": record["source_value"],
+        "unit": record["source_unit"],
+        "source": record["source"],
+        "external_record_id": record["external_record_id"],
+    }
+
+
+def activity_input_from_record(record: dict) -> dict[str, Any]:
+    return {
+        "activity_type": record["activity_type"],
+        "started_at": record["started_at"],
+        "ended_at": record["ended_at"],
+        "duration_seconds": record["duration_seconds"],
+        "distance_value": record["source_distance_value"],
+        "distance_unit": record["source_distance_unit"],
+        "energy_value": record["source_energy_value"],
+        "energy_unit": record["source_energy_unit"],
+        "source": record["source"],
+        "external_record_id": record["external_record_id"],
+        "source_metadata": record["source_metadata"],
+    }
+
+
+@app.get("/api/health/weights")
+def list_health_weights(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {HEALTH_WEIGHT_COLUMNS} FROM health_weights ORDER BY measured_at DESC, id")
+        return cursor.fetchall()
+
+
+@app.get("/api/health/weights/{weight_id}")
+def get_health_weight(weight_id: str, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {HEALTH_WEIGHT_COLUMNS} FROM health_weights WHERE id = %s", (weight_id,))
+        record = cursor.fetchone()
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weight not found")
+    return record
+
+
+@app.post("/api/health/weights", status_code=status.HTTP_201_CREATED)
+def create_health_weight(
+    weight: WeightInput,
+    response: Response,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    values = weight_values(weight)
+    values["id"] = str(uuid4())
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO health_weights (
+                id, measured_at, normalized_kg, source_value, source_unit, source, external_record_id
+            ) VALUES (
+                %(id)s, %(measured_at)s, %(normalized_kg)s, %(source_value)s, %(source_unit)s, %(source)s,
+                %(external_record_id)s
+            ) ON CONFLICT (source, external_record_id) WHERE external_record_id IS NOT NULL DO UPDATE SET
+                measured_at = EXCLUDED.measured_at,
+                normalized_kg = EXCLUDED.normalized_kg,
+                source_value = EXCLUDED.source_value,
+                source_unit = EXCLUDED.source_unit,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING {HEALTH_WEIGHT_COLUMNS}, (xmax = 0) AS inserted
+            """,
+            values,
+        )
+        record = cursor.fetchone()
+    if not record.pop("inserted"):
+        response.status_code = status.HTTP_200_OK
+    return record
+
+
+@app.patch("/api/health/weights/{weight_id}")
+def update_health_weight(
+    weight_id: str,
+    weight: WeightPatch,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    changes = weight.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No weight fields supplied")
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {HEALTH_WEIGHT_COLUMNS} FROM health_weights WHERE id = %s", (weight_id,))
+        record = cursor.fetchone()
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weight not found")
+        payload = weight_input_from_record(record)
+        payload.update(changes)
+        values = weight_values(WeightInput.model_validate(payload))
+        values["id"] = weight_id
+        try:
+            cursor.execute(
+                f"""
+                UPDATE health_weights SET
+                    measured_at = %(measured_at)s,
+                    normalized_kg = %(normalized_kg)s,
+                    source_value = %(source_value)s,
+                    source_unit = %(source_unit)s,
+                    source = %(source)s,
+                    external_record_id = %(external_record_id)s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %(id)s
+                RETURNING {HEALTH_WEIGHT_COLUMNS}
+                """,
+                values,
+            )
+            return cursor.fetchone()
+        except psycopg.errors.UniqueViolation as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Weight external record already exists") from error
+
+
+@app.get("/api/health/activities")
+def list_health_activities(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {HEALTH_ACTIVITY_COLUMNS} FROM health_activities ORDER BY started_at DESC, id")
+        return cursor.fetchall()
+
+
+@app.get("/api/health/activities/{activity_id}")
+def get_health_activity(activity_id: str, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {HEALTH_ACTIVITY_COLUMNS} FROM health_activities WHERE id = %s", (activity_id,))
+        record = cursor.fetchone()
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
+    return record
+
+
+@app.post("/api/health/activities", status_code=status.HTTP_201_CREATED)
+def create_health_activity(
+    activity: ActivityInput,
+    response: Response,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    values = activity_values(activity)
+    values["id"] = str(uuid4())
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO health_activities (
+                id, activity_type, started_at, ended_at, duration_seconds, distance_meters, source_distance_value,
+                source_distance_unit, energy_kilocalories, source_energy_value, source_energy_unit, source,
+                external_record_id, source_metadata
+            ) VALUES (
+                %(id)s, %(activity_type)s, %(started_at)s, %(ended_at)s, %(duration_seconds)s, %(distance_meters)s,
+                %(source_distance_value)s, %(source_distance_unit)s, %(energy_kilocalories)s, %(source_energy_value)s,
+                %(source_energy_unit)s, %(source)s, %(external_record_id)s, %(source_metadata)s::jsonb
+            ) ON CONFLICT (source, external_record_id) WHERE external_record_id IS NOT NULL DO UPDATE SET
+                activity_type = EXCLUDED.activity_type,
+                started_at = EXCLUDED.started_at,
+                ended_at = EXCLUDED.ended_at,
+                duration_seconds = EXCLUDED.duration_seconds,
+                distance_meters = EXCLUDED.distance_meters,
+                source_distance_value = EXCLUDED.source_distance_value,
+                source_distance_unit = EXCLUDED.source_distance_unit,
+                energy_kilocalories = EXCLUDED.energy_kilocalories,
+                source_energy_value = EXCLUDED.source_energy_value,
+                source_energy_unit = EXCLUDED.source_energy_unit,
+                source_metadata = EXCLUDED.source_metadata,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING {HEALTH_ACTIVITY_COLUMNS}, (xmax = 0) AS inserted
+            """,
+            values,
+        )
+        record = cursor.fetchone()
+    if not record.pop("inserted"):
+        response.status_code = status.HTTP_200_OK
+    return record
+
+
+@app.patch("/api/health/activities/{activity_id}")
+def update_health_activity(
+    activity_id: str,
+    activity: ActivityPatch,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    changes = activity.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No activity fields supplied")
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {HEALTH_ACTIVITY_COLUMNS} FROM health_activities WHERE id = %s", (activity_id,))
+        record = cursor.fetchone()
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Activity not found")
+        payload = activity_input_from_record(record)
+        payload.update(changes)
+        values = activity_values(ActivityInput.model_validate(payload))
+        values["id"] = activity_id
+        try:
+            cursor.execute(
+                f"""
+                UPDATE health_activities SET
+                    activity_type = %(activity_type)s,
+                    started_at = %(started_at)s,
+                    ended_at = %(ended_at)s,
+                    duration_seconds = %(duration_seconds)s,
+                    distance_meters = %(distance_meters)s,
+                    source_distance_value = %(source_distance_value)s,
+                    source_distance_unit = %(source_distance_unit)s,
+                    energy_kilocalories = %(energy_kilocalories)s,
+                    source_energy_value = %(source_energy_value)s,
+                    source_energy_unit = %(source_energy_unit)s,
+                    source = %(source)s,
+                    external_record_id = %(external_record_id)s,
+                    source_metadata = %(source_metadata)s::jsonb,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %(id)s
+                RETURNING {HEALTH_ACTIVITY_COLUMNS}
+                """,
+                values,
+            )
+            return cursor.fetchone()
+        except psycopg.errors.UniqueViolation as error:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Activity external record already exists") from error
 
 
 @app.get("/api/projects")
