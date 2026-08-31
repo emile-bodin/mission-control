@@ -1,3 +1,5 @@
+import base64
+import binascii
 from collections.abc import Generator
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
@@ -13,9 +15,10 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 
 class ProjectStatus(str, Enum):
@@ -313,6 +316,20 @@ class ActivityPatch(BaseModel):
     @classmethod
     def normalize_activity_time(cls, value: datetime | None) -> datetime | None:
         return normalize_health_timestamp(value) if value is not None else value
+
+
+class SyncWeightInput(WeightInput):
+    external_record_id: str = Field(min_length=1, max_length=200)
+
+
+class SyncActivityInput(ActivityInput):
+    external_record_id: str = Field(min_length=1, max_length=200)
+
+
+class HealthSyncBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    records: list[dict[str, Any]] = Field(min_length=1, max_length=100)
 
 
 class PairingChallengeCreate(BaseModel):
@@ -620,6 +637,7 @@ PAIRING_CODE_TTL = timedelta(minutes=10)
 PAIRING_RATE_LIMIT = 5
 PAIRING_RATE_WINDOW = timedelta(minutes=10)
 LAST_SEEN_UPDATE_INTERVAL = timedelta(minutes=5)
+HEALTH_SYNC_MAX_PAYLOAD_BYTES = 1_048_576
 
 
 def device_secret(name: str) -> str:
@@ -662,6 +680,32 @@ def trusted_client_ip(request: Request) -> str:
     if forwarded:
         return forwarded.split(",", 1)[0].strip()
     return request.client.host if request.client else "unknown"
+
+
+def require_paired_device(authorization: str | None, connection: psycopg.Connection) -> dict:
+    token_hash = secret_hash(bearer_token(authorization))
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, device_name, paired_at, last_seen_at, revoked_at
+            FROM paired_devices
+            WHERE token_hash = %s AND revoked_at IS NULL
+            """,
+            (token_hash,),
+        )
+        device = cursor.fetchone()
+        if device is None:
+            raise generic_unauthorized()
+        cursor.execute(
+            """
+            UPDATE paired_devices
+            SET last_seen_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+              AND (last_seen_at IS NULL OR last_seen_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes')
+            """,
+            (device["id"],),
+        )
+    return device
 
 
 def create_pairing_challenge(connection: psycopg.Connection, device_name: str) -> dict:
@@ -929,6 +973,15 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Bodin Control Center API", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def limit_health_sync_payload(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/api/v1/health/sync":
+        body = await request.body()
+        if len(body) > HEALTH_SYNC_MAX_PAYLOAD_BYTES:
+            return JSONResponse(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, content={"detail": "Sync payload too large"})
+    return await call_next(request)
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -1008,33 +1061,10 @@ def exchange_pairing_challenge(
 
 @app.get("/api/devices/me", response_model=DeviceStatus)
 def get_device_status(
-    request: Request,
     authorization: str | None = Header(default=None),
     connection: psycopg.Connection = Depends(get_connection),
 ) -> dict:
-    token_hash = secret_hash(bearer_token(authorization))
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            SELECT id, device_name, paired_at, last_seen_at, revoked_at
-            FROM paired_devices
-            WHERE token_hash = %s AND revoked_at IS NULL
-            """,
-            (token_hash,),
-        )
-        device = cursor.fetchone()
-        if device is None:
-            raise generic_unauthorized()
-        cursor.execute(
-            """
-            UPDATE paired_devices
-            SET last_seen_at = CURRENT_TIMESTAMP
-            WHERE id = %s
-              AND (last_seen_at IS NULL OR last_seen_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes')
-            """,
-            (device["id"],),
-        )
-    return device
+    return require_paired_device(authorization, connection)
 
 
 @app.get("/api/devices", response_model=DeviceListResponse)
@@ -1111,6 +1141,212 @@ def activity_values(activity: ActivityInput) -> dict[str, Any]:
     return values
 
 
+def upsert_health_weight(cursor: psycopg.Cursor, weight: WeightInput) -> tuple[dict, str]:
+    values = weight_values(weight)
+    values["id"] = str(uuid4())
+    cursor.execute(
+        f"""
+        INSERT INTO health_weights (
+            id, measured_at, normalized_kg, source_value, source_unit, source, external_record_id
+        ) VALUES (
+            %(id)s, %(measured_at)s, %(normalized_kg)s, %(source_value)s, %(source_unit)s, %(source)s,
+            %(external_record_id)s
+        ) ON CONFLICT (source, external_record_id) WHERE external_record_id IS NOT NULL DO UPDATE SET
+            measured_at = EXCLUDED.measured_at,
+            normalized_kg = EXCLUDED.normalized_kg,
+            source_value = EXCLUDED.source_value,
+            source_unit = EXCLUDED.source_unit,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE (health_weights.measured_at, health_weights.normalized_kg, health_weights.source_value,
+               health_weights.source_unit) IS DISTINCT FROM
+              (EXCLUDED.measured_at, EXCLUDED.normalized_kg, EXCLUDED.source_value, EXCLUDED.source_unit)
+        RETURNING {HEALTH_WEIGHT_COLUMNS}, (xmax = 0) AS inserted
+        """,
+        values,
+    )
+    record = cursor.fetchone()
+    if record is not None:
+        return record, "created" if record.pop("inserted") else "updated"
+    cursor.execute(
+        f"SELECT {HEALTH_WEIGHT_COLUMNS} FROM health_weights WHERE source = %s AND external_record_id = %s",
+        (weight.source, weight.external_record_id),
+    )
+    return cursor.fetchone(), "unchanged"
+
+
+def upsert_health_activity(cursor: psycopg.Cursor, activity: ActivityInput) -> tuple[dict, str]:
+    values = activity_values(activity)
+    values["id"] = str(uuid4())
+    cursor.execute(
+        f"""
+        INSERT INTO health_activities (
+            id, activity_type, started_at, ended_at, duration_seconds, distance_meters, source_distance_value,
+            source_distance_unit, energy_kilocalories, source_energy_value, source_energy_unit, source,
+            external_record_id, source_metadata
+        ) VALUES (
+            %(id)s, %(activity_type)s, %(started_at)s, %(ended_at)s, %(duration_seconds)s, %(distance_meters)s,
+            %(source_distance_value)s, %(source_distance_unit)s, %(energy_kilocalories)s, %(source_energy_value)s,
+            %(source_energy_unit)s, %(source)s, %(external_record_id)s, %(source_metadata)s::jsonb
+        ) ON CONFLICT (source, external_record_id) WHERE external_record_id IS NOT NULL DO UPDATE SET
+            activity_type = EXCLUDED.activity_type,
+            started_at = EXCLUDED.started_at,
+            ended_at = EXCLUDED.ended_at,
+            duration_seconds = EXCLUDED.duration_seconds,
+            distance_meters = EXCLUDED.distance_meters,
+            source_distance_value = EXCLUDED.source_distance_value,
+            source_distance_unit = EXCLUDED.source_distance_unit,
+            energy_kilocalories = EXCLUDED.energy_kilocalories,
+            source_energy_value = EXCLUDED.source_energy_value,
+            source_energy_unit = EXCLUDED.source_energy_unit,
+            source_metadata = EXCLUDED.source_metadata,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE (health_activities.activity_type, health_activities.started_at, health_activities.ended_at,
+               health_activities.duration_seconds, health_activities.distance_meters,
+               health_activities.source_distance_value, health_activities.source_distance_unit,
+               health_activities.energy_kilocalories, health_activities.source_energy_value,
+               health_activities.source_energy_unit, health_activities.source_metadata) IS DISTINCT FROM
+              (EXCLUDED.activity_type, EXCLUDED.started_at, EXCLUDED.ended_at, EXCLUDED.duration_seconds,
+               EXCLUDED.distance_meters, EXCLUDED.source_distance_value, EXCLUDED.source_distance_unit,
+               EXCLUDED.energy_kilocalories, EXCLUDED.source_energy_value, EXCLUDED.source_energy_unit,
+               EXCLUDED.source_metadata)
+        RETURNING {HEALTH_ACTIVITY_COLUMNS}, (xmax = 0) AS inserted
+        """,
+        values,
+    )
+    record = cursor.fetchone()
+    if record is not None:
+        return record, "created" if record.pop("inserted") else "updated"
+    cursor.execute(
+        f"SELECT {HEALTH_ACTIVITY_COLUMNS} FROM health_activities WHERE source = %s AND external_record_id = %s",
+        (activity.source, activity.external_record_id),
+    )
+    return cursor.fetchone(), "unchanged"
+
+
+def encode_health_sync_cursor(updated_at: datetime, record_type: str, record_id: str) -> str:
+    payload = json.dumps(
+        {"v": 1, "updated_at": updated_at.astimezone(UTC).isoformat(), "type": record_type, "id": record_id},
+        separators=(",", ":"),
+    ).encode()
+    return base64.urlsafe_b64encode(payload).decode().rstrip("=")
+
+
+def decode_health_sync_cursor(cursor: str) -> tuple[datetime, str, str]:
+    try:
+        payload = json.loads(base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True))
+        if set(payload) != {"v", "updated_at", "type", "id"} or payload["v"] != 1 or payload["type"] not in {
+            "weight",
+            "activity",
+        }:
+            raise ValueError
+        updated_at = normalize_health_timestamp(datetime.fromisoformat(payload["updated_at"].replace("Z", "+00:00")))
+        if not isinstance(payload["id"], str) or not payload["id"]:
+            raise ValueError
+        return updated_at, payload["type"], payload["id"]
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error) as error:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid sync cursor") from error
+
+
+def sync_validation_result(index: int, record_type: str, error: ValidationError | ValueError) -> dict:
+    if isinstance(error, ValidationError):
+        details = [{"loc": list(item["loc"]), "message": item["msg"], "type": item["type"]} for item in error.errors()]
+    else:
+        details = [{"loc": [], "message": str(error), "type": "value_error"}]
+    return {"index": index, "type": record_type, "status": "invalid", "error": {"code": "validation_error", "details": details}}
+
+
+@app.post("/api/v1/health/sync")
+def sync_health_records(
+    batch: HealthSyncBatch,
+    authorization: str | None = Header(default=None),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    require_paired_device(authorization, connection)
+    connection.commit()
+    results: list[dict] = []
+    for index, raw_record in enumerate(batch.records):
+        record = dict(raw_record)
+        record_type = record.pop("type", "unknown")
+        if record_type not in {"weight", "activity"}:
+            results.append(sync_validation_result(index, "unknown", ValueError("Record type must be weight or activity")))
+            continue
+        try:
+            health_record = (
+                SyncWeightInput.model_validate(record)
+                if record_type == "weight"
+                else SyncActivityInput.model_validate(record)
+            )
+        except ValidationError as error:
+            results.append(sync_validation_result(index, record_type, error))
+            continue
+        try:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    stored, outcome = (
+                        upsert_health_weight(cursor, health_record)
+                        if record_type == "weight"
+                        else upsert_health_activity(cursor, health_record)
+                    )
+            results.append(
+                {
+                    "index": index,
+                    "type": record_type,
+                    "status": outcome,
+                    "id": stored["id"],
+                    "source": stored["source"],
+                    "external_record_id": stored["external_record_id"],
+                }
+            )
+        except psycopg.Error:
+            results.append(
+                {"index": index, "type": record_type, "status": "failed", "error": {"code": "storage_error"}}
+            )
+    accepted = sum(result["status"] in {"created", "updated", "unchanged"} for result in results)
+    return {"api_version": "v1", "accepted": accepted, "rejected": len(results) - accepted, "results": results}
+
+
+@app.get("/api/v1/health/sync")
+def list_health_sync_changes(
+    cursor: str | None = None,
+    limit: int = Query(default=100, ge=1, le=100),
+    authorization: str | None = Header(default=None),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    require_paired_device(authorization, connection)
+    cursor_values = decode_health_sync_cursor(cursor) if cursor else None
+    query = """
+        WITH changes AS (
+            SELECT 'weight' AS record_type, id, updated_at FROM health_weights
+            UNION ALL
+            SELECT 'activity' AS record_type, id, updated_at FROM health_activities
+        )
+        SELECT record_type, id, updated_at
+        FROM changes
+    """
+    parameters: tuple[Any, ...] = ()
+    if cursor_values:
+        query += " WHERE (updated_at, record_type, id) > (%s, %s, %s)"
+        parameters = cursor_values
+    query += " ORDER BY updated_at, record_type, id LIMIT %s"
+    with connection.cursor() as db_cursor:
+        db_cursor.execute(query, (*parameters, limit + 1))
+        changes = db_cursor.fetchall()
+        records: list[dict] = []
+        for change in changes[:limit]:
+            columns = HEALTH_WEIGHT_COLUMNS if change["record_type"] == "weight" else HEALTH_ACTIVITY_COLUMNS
+            table = "health_weights" if change["record_type"] == "weight" else "health_activities"
+            db_cursor.execute(f"SELECT {columns} FROM {table} WHERE id = %s", (change["id"],))
+            record = db_cursor.fetchone()
+            record["type"] = change["record_type"]
+            records.append(record)
+    next_cursor = (
+        encode_health_sync_cursor(changes[min(len(changes), limit) - 1]["updated_at"], changes[min(len(changes), limit) - 1]["record_type"], changes[min(len(changes), limit) - 1]["id"])
+        if records
+        else cursor
+    )
+    return {"api_version": "v1", "records": records, "next_cursor": next_cursor, "has_more": len(changes) > limit}
+
+
 def weight_input_from_record(record: dict) -> dict[str, Any]:
     return {
         "measured_at": record["measured_at"],
@@ -1160,28 +1396,9 @@ def create_health_weight(
     response: Response,
     connection: psycopg.Connection = Depends(get_connection),
 ) -> dict:
-    values = weight_values(weight)
-    values["id"] = str(uuid4())
     with connection.cursor() as cursor:
-        cursor.execute(
-            f"""
-            INSERT INTO health_weights (
-                id, measured_at, normalized_kg, source_value, source_unit, source, external_record_id
-            ) VALUES (
-                %(id)s, %(measured_at)s, %(normalized_kg)s, %(source_value)s, %(source_unit)s, %(source)s,
-                %(external_record_id)s
-            ) ON CONFLICT (source, external_record_id) WHERE external_record_id IS NOT NULL DO UPDATE SET
-                measured_at = EXCLUDED.measured_at,
-                normalized_kg = EXCLUDED.normalized_kg,
-                source_value = EXCLUDED.source_value,
-                source_unit = EXCLUDED.source_unit,
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING {HEALTH_WEIGHT_COLUMNS}, (xmax = 0) AS inserted
-            """,
-            values,
-        )
-        record = cursor.fetchone()
-    if not record.pop("inserted"):
+        record, outcome = upsert_health_weight(cursor, weight)
+    if outcome != "created":
         response.status_code = status.HTTP_200_OK
     return record
 
@@ -1248,38 +1465,9 @@ def create_health_activity(
     response: Response,
     connection: psycopg.Connection = Depends(get_connection),
 ) -> dict:
-    values = activity_values(activity)
-    values["id"] = str(uuid4())
     with connection.cursor() as cursor:
-        cursor.execute(
-            f"""
-            INSERT INTO health_activities (
-                id, activity_type, started_at, ended_at, duration_seconds, distance_meters, source_distance_value,
-                source_distance_unit, energy_kilocalories, source_energy_value, source_energy_unit, source,
-                external_record_id, source_metadata
-            ) VALUES (
-                %(id)s, %(activity_type)s, %(started_at)s, %(ended_at)s, %(duration_seconds)s, %(distance_meters)s,
-                %(source_distance_value)s, %(source_distance_unit)s, %(energy_kilocalories)s, %(source_energy_value)s,
-                %(source_energy_unit)s, %(source)s, %(external_record_id)s, %(source_metadata)s::jsonb
-            ) ON CONFLICT (source, external_record_id) WHERE external_record_id IS NOT NULL DO UPDATE SET
-                activity_type = EXCLUDED.activity_type,
-                started_at = EXCLUDED.started_at,
-                ended_at = EXCLUDED.ended_at,
-                duration_seconds = EXCLUDED.duration_seconds,
-                distance_meters = EXCLUDED.distance_meters,
-                source_distance_value = EXCLUDED.source_distance_value,
-                source_distance_unit = EXCLUDED.source_distance_unit,
-                energy_kilocalories = EXCLUDED.energy_kilocalories,
-                source_energy_value = EXCLUDED.source_energy_value,
-                source_energy_unit = EXCLUDED.source_energy_unit,
-                source_metadata = EXCLUDED.source_metadata,
-                updated_at = CURRENT_TIMESTAMP
-            RETURNING {HEALTH_ACTIVITY_COLUMNS}, (xmax = 0) AS inserted
-            """,
-            values,
-        )
-        record = cursor.fetchone()
-    if not record.pop("inserted"):
+        record, outcome = upsert_health_activity(cursor, activity)
+    if outcome != "created":
         response.status_code = status.HTTP_200_OK
     return record
 
