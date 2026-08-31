@@ -5,6 +5,7 @@
     <string name="pair_button">Koppelen</string>
     <string name="check_button">Status controleren</string>
     <string name="health_section">Health Connect</string>
+    <string name="health_permissions_rationale">Mission Control leest alleen gewicht en bewegingsactiviteiten waarvoor u toestemming geeft. Deze gegevens worden naar uw gekoppelde Mission Control-backend gesynchroniseerd. Mission Control schrijft geen gegevens naar Health Connect. U kunt toestemming altijd intrekken in Health Connect.</string>
     <string name="health_permission_button">Toestemming geven</string>
     <string name="health_sync_button">Nu synchroniseren</string>
 </resources>
