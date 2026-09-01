@@ -49,3 +49,11 @@ test("Today directs personal records to domain pages", async () => {
   const page = await source("app/page.tsx");
   for (const path of ["/administratie", "/huis-gezin", "/routines", "/gezondheid"]) assert.match(page, new RegExp(`return "${path}"`));
 });
+
+test("personal routes expose accessible loading states", async () => {
+  for (const path of ["app/administratie/loading.tsx", "app/huis-gezin/loading.tsx", "app/routines/loading.tsx", "app/gezondheid/loading.tsx"]) {
+    const loading = await source(path);
+    assert.match(loading, /aria-live="polite"/);
+    assert.match(loading, /laden…/);
+  }
+});
