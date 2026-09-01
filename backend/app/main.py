@@ -2,7 +2,7 @@ import base64
 import binascii
 from collections.abc import Generator
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
 import hmac
 import json
@@ -51,6 +51,12 @@ class ActionDomain(str, Enum):
     ADMINISTRATION = "administratie"
     HOUSEHOLD = "huis_gezin"
     PROJECT = "project"
+
+
+class RoutineFrequency(str, Enum):
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    SELECTED_WEEKDAYS = "selected_weekdays"
 
 
 class AssetStatus(str, Enum):
@@ -103,6 +109,44 @@ def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str
             fields[key.split(";", 1)[0]] = value.replace("\\,", ",").replace("\\n", " ")
 
     return sorted(events, key=lambda event: event["starts_at"])
+
+
+def product_local_date(now: datetime | None = None) -> date:
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("Routine scheduling requires an aware datetime")
+    return current.astimezone(PRODUCT_TIMEZONE).date()
+
+
+def routine_is_scheduled_on(routine: dict, occurrence_date: date) -> bool:
+    frequency = RoutineFrequency(routine["frequency"])
+    if frequency is RoutineFrequency.DAILY:
+        return True
+    weekdays = routine["weekdays"]
+    if isinstance(weekdays, str):
+        weekdays = json.loads(weekdays)
+    return occurrence_date.isoweekday() in weekdays
+
+
+def due_routines_for_date(connection: psycopg.Connection, occurrence_date: date) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT {ROUTINE_COLUMNS}
+            FROM routines
+            WHERE active
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM routine_completions
+                  WHERE routine_completions.routine_id = routines.id
+                    AND routine_completions.occurrence_date = %s
+              )
+            ORDER BY reminder_time, title, id
+            """,
+            (occurrence_date,),
+        )
+        routines = cursor.fetchall()
+    return [routine for routine in routines if routine_is_scheduled_on(routine, occurrence_date)]
 
 
 class ProjectInput(BaseModel):
@@ -219,6 +263,53 @@ class ActionPatch(BaseModel):
     due_date: date | None = None
     domain: ActionDomain = Field(default=None)
     owner_id: str | None = None
+
+
+class RoutineInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1)
+    active: bool = True
+    frequency: RoutineFrequency
+    weekdays: list[int] = Field(default_factory=list)
+    reminder_time: time
+    owner_id: str | None = None
+
+    @field_validator("weekdays")
+    @classmethod
+    def validate_weekdays(cls, weekdays: list[int]) -> list[int]:
+        if any(weekday < 1 or weekday > 7 for weekday in weekdays):
+            raise ValueError("Weekdays must use ISO values 1 through 7")
+        if len(set(weekdays)) != len(weekdays):
+            raise ValueError("Weekdays must not contain duplicates")
+        return sorted(weekdays)
+
+    @model_validator(mode="after")
+    def validate_schedule(self):
+        if self.frequency is RoutineFrequency.DAILY and self.weekdays:
+            raise ValueError("Daily routines must not set weekdays")
+        if self.frequency is RoutineFrequency.WEEKLY and len(self.weekdays) != 1:
+            raise ValueError("Weekly routines require exactly one weekday")
+        if self.frequency is RoutineFrequency.SELECTED_WEEKDAYS and not self.weekdays:
+            raise ValueError("Selected-weekday routines require weekdays")
+        return self
+
+
+class RoutinePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(default=None, min_length=1)
+    active: bool = Field(default=None)
+    frequency: RoutineFrequency = Field(default=None)
+    weekdays: list[int] = Field(default=None)
+    reminder_time: time = Field(default=None)
+    owner_id: str | None = None
+
+
+class RoutineOccurrenceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    occurrence_date: date | None = None
 
 
 class AssetInput(BaseModel):
@@ -405,6 +496,14 @@ ASSET_COLUMNS = """
 
 ACTION_COLUMNS = """
     id, title, type, status, priority, project_id, status_card_id, due_date, domain, owner_id, created_at, updated_at
+"""
+
+ROUTINE_COLUMNS = """
+    id, title, active, frequency, weekdays, reminder_time, owner_id, created_at, updated_at
+"""
+
+ROUTINE_COMPLETION_COLUMNS = """
+    id, routine_id, occurrence_date, completed_at, created_at
 """
 
 HEALTH_WEIGHT_COLUMNS = """
@@ -920,6 +1019,39 @@ def run_migrations() -> None:
                     next_step TEXT NOT NULL DEFAULT 'Unknown',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS routines (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    frequency TEXT NOT NULL CHECK (frequency IN ('daily', 'weekly', 'selected_weekdays')),
+                    weekdays JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(weekdays) = 'array'),
+                    reminder_time TIME NOT NULL,
+                    owner_id TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS routine_completions (
+                    id TEXT PRIMARY KEY,
+                    routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+                    occurrence_date DATE NOT NULL,
+                    completed_at TIMESTAMPTZ NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (routine_id, occurrence_date)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS routine_completions_routine_occurrence_idx
+                ON routine_completions (routine_id, occurrence_date)
                 """
             )
             cursor.execute(
@@ -1777,6 +1909,140 @@ def update_status_card(
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Status card not found")
     return updated
+
+
+@app.get("/api/routines")
+def list_routines(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {ROUTINE_COLUMNS} FROM routines ORDER BY active DESC, reminder_time, title, id")
+        return cursor.fetchall()
+
+
+@app.get("/api/routines/due")
+def list_due_routines(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    return due_routines_for_date(connection, product_local_date())
+
+
+@app.get("/api/routines/{routine_id}")
+def get_routine(routine_id: str, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {ROUTINE_COLUMNS} FROM routines WHERE id = %s", (routine_id,))
+        routine = cursor.fetchone()
+    if routine is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Routine not found")
+    return routine
+
+
+@app.post("/api/routines", status_code=status.HTTP_201_CREATED)
+def create_routine(routine: RoutineInput, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    values = routine.model_dump()
+    values["id"] = str(uuid4())
+    values["weekdays"] = json.dumps(values["weekdays"])
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO routines (id, title, active, frequency, weekdays, reminder_time, owner_id)
+            VALUES (%(id)s, %(title)s, %(active)s, %(frequency)s, %(weekdays)s::jsonb, %(reminder_time)s, %(owner_id)s)
+            RETURNING {ROUTINE_COLUMNS}
+            """,
+            values,
+        )
+        return cursor.fetchone()
+
+
+@app.patch("/api/routines/{routine_id}")
+def update_routine(
+    routine_id: str, routine: RoutinePatch, connection: psycopg.Connection = Depends(get_connection)
+) -> dict:
+    changes = routine.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No routine fields supplied")
+    existing = get_routine(routine_id, connection)
+    candidate = RoutineInput.model_validate(
+        {
+            "title": existing["title"],
+            "active": existing["active"],
+            "frequency": existing["frequency"],
+            "weekdays": existing["weekdays"],
+            "reminder_time": existing["reminder_time"],
+            "owner_id": existing["owner_id"],
+            **changes,
+        }
+    )
+    values = candidate.model_dump(include=set(changes))
+    columns = []
+    for column in values:
+        columns.append(f"{column} = %({column})s::jsonb" if column == "weekdays" else f"{column} = %({column})s")
+    if "weekdays" in values:
+        values["weekdays"] = json.dumps(values["weekdays"])
+    values["id"] = routine_id
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"UPDATE routines SET {', '.join(columns)}, updated_at = CURRENT_TIMESTAMP "
+            f"WHERE id = %(id)s RETURNING {ROUTINE_COLUMNS}",
+            values,
+        )
+        return cursor.fetchone()
+
+
+@app.get("/api/routines/{routine_id}/completions")
+def list_routine_completions(
+    routine_id: str, connection: psycopg.Connection = Depends(get_connection)
+) -> list[dict]:
+    get_routine(routine_id, connection)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {ROUTINE_COMPLETION_COLUMNS} FROM routine_completions "
+            "WHERE routine_id = %s ORDER BY occurrence_date DESC, completed_at DESC",
+            (routine_id,),
+        )
+        return cursor.fetchall()
+
+
+@app.post("/api/routines/{routine_id}/complete")
+def complete_routine(
+    routine_id: str,
+    occurrence: RoutineOccurrenceInput,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    get_routine(routine_id, connection)
+    occurrence_date = occurrence.occurrence_date or product_local_date()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO routine_completions (id, routine_id, occurrence_date, completed_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (routine_id, occurrence_date) DO NOTHING
+            RETURNING {ROUTINE_COMPLETION_COLUMNS}
+            """,
+            (str(uuid4()), routine_id, occurrence_date, datetime.now(UTC)),
+        )
+        completion = cursor.fetchone()
+        if completion is None:
+            cursor.execute(
+                f"SELECT {ROUTINE_COMPLETION_COLUMNS} FROM routine_completions "
+                "WHERE routine_id = %s AND occurrence_date = %s",
+                (routine_id, occurrence_date),
+            )
+            completion = cursor.fetchone()
+        return completion
+
+
+@app.post("/api/routines/{routine_id}/uncomplete")
+def uncomplete_routine(
+    routine_id: str,
+    occurrence: RoutineOccurrenceInput,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    get_routine(routine_id, connection)
+    occurrence_date = occurrence.occurrence_date or product_local_date()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM routine_completions WHERE routine_id = %s AND occurrence_date = %s RETURNING id",
+            (routine_id, occurrence_date),
+        )
+        removed = cursor.fetchone() is not None
+    return {"routine_id": routine_id, "occurrence_date": occurrence_date, "removed": removed}
 
 
 @app.get("/api/actions")
