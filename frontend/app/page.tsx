@@ -1,72 +1,194 @@
 import Link from "next/link";
 import { LocalClock } from "./local-clock";
 
-type Project = { name: string; slug: string; display_name: string; product_key: string; status: string; personal_status: string };
-type StatusCard = { id: string; project_id: string | null; title: string; status: "OK" | "Let op" | "Actie nodig" | "Geblokkeerd" | "Onbekend"; facts: string; interpretation: string; next_safe_step: string; source_type: string; updated_at: string; resolved_at: string | null };
-type Action = { id: string; title: string; status: "Open" | "Bezig" | "Klaar" | "Later"; priority: string; due_date: string | null; updated_at: string };
-type HomelabResource = { id: string; name: string; type: string; status: string; updated_at: string };
-type Homelab = { available: boolean; resources: HomelabResource[]; last_updated_at: string };
-type CalendarEvent = { starts_at: string; summary: string };
-type Schedule = { status: string; events: CalendarEvent[] };
-type CodexRun = { id: string; project_id: string; linear_issue: string; model: string; profile: string; reasoning_level: string; session_type: string; status: string; created_at: string };
+type TodayStatus = "available" | "empty" | "partial" | "error" | "not_configured" | "stale" | "unavailable";
+
+type TodayItem = {
+  id: string;
+  kind: string;
+  source: string;
+  title: string;
+  domain: string | null;
+  status: string | null;
+  due_date: string | null;
+  reminder_time: string | null;
+  details: Record<string, unknown>;
+};
+
+type TodaySection = {
+  status: TodayStatus;
+  items: TodayItem[];
+  source_status: Record<string, TodayStatus>;
+  error: string | null;
+};
+
+type TodayView = {
+  generated_at: string;
+  timezone: string;
+  local_date: string;
+  sources: Record<string, { status: TodayStatus; item_count: number; error: string | null }>;
+  sections: { overdue: TodaySection; today: TodaySection; routines: TodaySection; upcoming: TodaySection; context: TodaySection };
+};
+
+const sourceLabels: Record<string, string> = {
+  actions: "Acties", calendar: "Agenda", routines: "Routines", health: "Gezondheid", projects: "Projecten", status_cards: "Statuskaarten", homelab: "Homelab"
+};
+
+const stateStyles: Record<TodayStatus, string> = {
+  available: "border-emerald-400/30 bg-emerald-400/10 text-emerald-200",
+  empty: "border-slate-600 bg-slate-800/70 text-slate-300",
+  partial: "border-amber-400/30 bg-amber-400/10 text-amber-200",
+  error: "border-red-400/35 bg-red-400/10 text-red-200",
+  not_configured: "border-violet-400/35 bg-violet-400/10 text-violet-200",
+  stale: "border-cyan-400/35 bg-cyan-400/10 text-cyan-200",
+  unavailable: "border-orange-400/35 bg-orange-400/10 text-orange-200"
+};
+
+const stateLabels: Record<TodayStatus, string> = {
+  available: "Beschikbaar", empty: "Leeg", partial: "Gedeeltelijk", error: "Mislukt", not_configured: "Niet ingesteld", stale: "Verouderd", unavailable: "Niet beschikbaar"
+};
 
 export const dynamic = "force-dynamic";
 
 export default async function TodayPage() {
-  const [projectsResponse, cardsResponse, actionsResponse, homelabResponse, scheduleResponse, runsResponse] = await Promise.all([
-    fetch("http://backend:8000/api/projects", { cache: "no-store" }),
-    fetch("http://backend:8000/api/status-cards", { cache: "no-store" }),
-    fetch("http://backend:8000/api/actions", { cache: "no-store" }),
-    fetch("http://backend:8000/api/homelab", { cache: "no-store" }),
-    fetch("http://backend:8000/api/calendar/schedule", { cache: "no-store" }),
-    fetch("http://backend:8000/api/codex-runs", { cache: "no-store" })
-  ]);
-  const projects: Project[] = projectsResponse.ok ? await projectsResponse.json() : [];
-  const cards: StatusCard[] = cardsResponse.ok ? await cardsResponse.json() : [];
-  const actions: Action[] = actionsResponse.ok ? await actionsResponse.json() : [];
-  const homelab: Homelab = homelabResponse.ok ? await homelabResponse.json() : { available: false, resources: [], last_updated_at: "Unknown" };
-  const schedule: Schedule = scheduleResponse.ok ? await scheduleResponse.json() : { status: "Onbekend", events: [] };
-  const runs: CodexRun[] = runsResponse.ok ? await runsResponse.json() : [];
-  const openCards = cards.filter((card) => !card.resolved_at);
-  const needsAttention = openCards.filter((card) => card.status === "Actie nodig" || card.status === "Geblokkeerd");
-  const openActions = actions.filter((action) => action.status !== "Klaar");
-  const recentActivity = [
-    ...cards.map((card) => ({ id: `card-${card.id}`, href: `/status-cards/${card.id}`, title: card.title, detail: `Statuskaart · ${card.status}`, updatedAt: card.updated_at })),
-    ...actions.map((action) => ({ id: `action-${action.id}`, href: `/actions/${action.id}`, title: action.title, detail: `Actie · ${action.status}`, updatedAt: action.updated_at }))
-  ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5);
+  let today: TodayView | null = null;
+  let loadError: string | null = null;
+
+  try {
+    const response = await fetch("http://backend:8000/api/today", { cache: "no-store" });
+    if (!response.ok) loadError = `Today-bron antwoordde met HTTP ${response.status}.`;
+    else today = await response.json();
+  } catch {
+    loadError = "Today-bron is niet bereikbaar.";
+  }
+
+  if (!today) return <TodayUnavailable error={loadError ?? "Today-bron gaf geen bruikbare response."} />;
+
+  const administration = today.sections.context.items.filter((item) => item.kind === "action" && item.domain === "administratie");
+  const household = today.sections.context.items.filter((item) => item.kind === "action" && item.domain === "huis_gezin");
+  const health = today.sections.context.items.filter((item) => item.source === "health");
+  const workSignals = today.sections.context.items.filter((item) => item.domain === "project" || ["projects", "homelab"].includes(item.source));
 
   return <main className="mx-auto max-w-7xl px-5 py-5 sm:px-8 lg:px-10">
-    <header className="flex flex-wrap items-center justify-between gap-5">
-      <div><h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">Goedendag.</h1><p className="mt-1 text-sm text-slate-400">Dit is wat vandaag aandacht vraagt.</p></div>
-      <div className="flex items-center gap-3"><span className="rounded-md border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-xs text-emerald-300">Local</span><LocalClock /></div>
+    <header className="flex flex-wrap items-start justify-between gap-5">
+      <div><h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">Vandaag</h1><p className="mt-1 text-sm text-slate-400">{formatDate(today.local_date)} · persoonlijke briefing</p></div>
+      <div className="text-right"><LocalClock /><p className="mt-1 text-xs text-slate-500">Gegenereerd {formatDateTime(today.generated_at, today.timezone)} · {today.timezone}</p><p className="mt-1 text-xs text-slate-500">Actualiteit volgt bronstatussen; geen lokale stale-beoordeling.</p></div>
     </header>
 
-    <section className="mt-4 grid gap-4 xl:grid-cols-[1.06fr_0.96fr_1.08fr]">
-      <Panel eyebrow="Quick Capture"><div className="space-y-3"><textarea aria-label="Quick Capture" className="min-h-24 resize-none border-slate-700 bg-slate-950/60 text-slate-500" placeholder="Inbox-opslag Unknown — capture is nog niet beschikbaar." readOnly /><div className="flex items-center justify-between gap-3"><p className="text-xs text-slate-500">Nieuwe captures horen in Inbox. Lokale Inbox-opslag ontbreekt.</p><button className="shrink-0 rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-600" disabled>Opslaan</button></div></div></Panel>
-      <Panel eyebrow="Today / Focus"><div className="space-y-3">{openActions.slice(0, 4).map((action) => <Link className="flex gap-3 text-sm text-slate-200 hover:text-indigo-300" href={`/actions/${action.id}`} key={action.id}><span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border border-indigo-400" /><span>{action.title}<span className="block text-xs text-slate-500">{action.status} · {action.priority}</span></span></Link>)}{!openActions.length && <p className="text-sm text-slate-500">Geen open lokale acties.</p>}<Link className="inline-block text-sm text-indigo-300 hover:text-indigo-200" href="/actions">Alle acties →</Link></div></Panel>
-      <Panel eyebrow="Schedule" detail={schedule.status === "Beschikbaar" ? "Private ICS · read-only" : "Unknown/onbekend"}><div className="space-y-3">{schedule.events.slice(0, 4).map((event) => <div className="flex gap-4 text-sm" key={`${event.starts_at}-${event.summary}`}><time className="w-12 shrink-0 font-medium text-slate-300">{formatTime(event.starts_at)}</time><p className="text-slate-200">{event.summary}</p></div>)}{!schedule.events.length && <p className="text-sm text-slate-500">Agenda niet beschikbaar. Geen aannames gemaakt.</p>}</div></Panel>
+    <section className="mt-5 grid gap-4 lg:grid-cols-[1.15fr_0.85fr]" aria-label="Dagcontext">
+      <Panel title="Briefing" description="Belangrijkste aandachtspunten voor nu." status={today.sections.overdue.status}>
+        <ItemList items={today.sections.overdue.items} emptyMessage="Geen urgente aandachtspunten." />
+        <SourceStates sourceNames={["actions", "status_cards"]} sources={today.sources} />
+      </Panel>
+      <Panel title="Agenda en focus" description="Vandaag eerst, daarna komende afspraken en acties." status={today.sections.today.status}>
+        <SectionItems label="Vandaag" section={today.sections.today} emptyMessage="Geen agenda- of focusitems voor vandaag." />
+        <SectionItems label="Hierna" section={today.sections.upcoming} emptyMessage="Geen komende agenda- of focusitems." />
+        <SourceStates sourceNames={["actions", "calendar"]} sources={today.sources} />
+      </Panel>
     </section>
 
-    <section className="mt-4 grid items-stretch gap-4 xl:grid-cols-[1.38fr_1fr]">
-      <Panel className="min-h-[220px]" eyebrow="Needs Attention" count={needsAttention.length}><div className="divide-y divide-slate-800">{needsAttention.map((card) => <Link className="block py-4 first:pt-0 last:pb-0 hover:bg-slate-900/40" href={`/status-cards/${card.id}`} key={card.id}><div className="flex items-start gap-3"><span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${card.status === "Geblokkeerd" ? "bg-red-400" : "bg-amber-400"}`} /><div className="min-w-0"><h3 className="font-medium text-slate-100">{card.title}</h3><p className="mt-2 text-sm text-slate-300"><span className="text-slate-500">Feit:</span> {card.facts}</p><p className="mt-1 text-sm text-slate-300"><span className="text-slate-500">Interpretatie:</span> {card.interpretation}</p><p className="mt-1 text-sm text-slate-300"><span className="text-slate-500">Volgende veilige stap:</span> {card.next_safe_step}</p></div></div></Link>)}{!needsAttention.length && <p className="text-sm text-slate-500">Geen lokale kaarten met Actie nodig of Geblokkeerd.</p>}</div></Panel>
-      <Panel className="min-h-[220px]" eyebrow="Inbox" count="Unknown"><p className="text-sm text-slate-500">Inbox-opslag is niet aanwezig in bestaande BCC-data. Nieuwe captures kunnen daarom niet veilig worden bewaard.</p></Panel>
+    <section className="mt-4" aria-label="Routines">
+      <Panel title="Routines" description="Gepland voor vandaag." status={today.sections.routines.status}>
+        <ItemList items={today.sections.routines.items} emptyMessage="Geen routines gepland voor vandaag." />
+        <SourceStates sourceNames={["routines"]} sources={today.sources} />
+      </Panel>
     </section>
 
-    <section className="mt-4 grid items-stretch gap-4 xl:grid-cols-[1.38fr_1fr]">
-      <Panel eyebrow="Projects"><div className="divide-y divide-slate-800">{projects.slice(0, 5).map((project) => <Link className="grid grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] items-center gap-4 py-1 text-sm first:pt-0 last:pb-0 hover:text-indigo-300" href={`/projects/${project.slug}`} key={project.slug}><span className="flex min-w-0 items-center gap-3"><span className="grid h-6 w-6 shrink-0 place-items-center rounded border border-slate-700 text-[9px] text-indigo-200">{project.product_key}</span><span className="truncate text-slate-200">{project.display_name}</span></span><span className="truncate text-xs text-slate-500">{project.status} · {project.personal_status}</span></Link>)}{!projects.length && <p className="text-sm text-slate-500">Geen lokale projectrecords.</p>}</div><Link className="mt-2 inline-block text-sm text-indigo-300 hover:text-indigo-200" href="/projects">Alle projecten →</Link></Panel>
-      <Panel eyebrow="Recent Activity"><div className="divide-y divide-slate-800">{recentActivity.map((item) => <Link className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-1 first:pt-0 last:pb-0 hover:text-indigo-300" href={item.href} key={item.id}><span className="truncate text-sm text-slate-200">{item.title}</span><time className="text-xs text-slate-500">{formatActivityTime(item.updatedAt)}</time></Link>)}{!recentActivity.length && <p className="text-sm text-slate-500">Geen lokale activiteit beschikbaar.</p>}</div></Panel>
+    <section className="mt-4 grid gap-4 lg:grid-cols-2" aria-label="Persoonlijke domeinen">
+      <Panel title="Administratie" description="Open administratieve context zonder datum." status={today.sources.actions.status}>
+        <ItemList items={administration} emptyMessage="Geen administratiesignalen in huidige context." />
+        <SourceStates sourceNames={["actions"]} sources={today.sources} />
+      </Panel>
+      <Panel title="Huis en gezin" description="Open context voor thuis." status={today.sources.actions.status}>
+        <ItemList items={household} emptyMessage="Geen huis- of gezinssignalen in huidige context." />
+        <SourceStates sourceNames={["actions"]} sources={today.sources} />
+      </Panel>
+      <Panel title="Gezondheid" description="Recente metingen en activiteiten; geen medische interpretatie." status={today.sources.health.status}>
+        <ItemList items={health} emptyMessage="Geen recente gezondheidsgegevens." />
+        <SourceStates sourceNames={["health"]} sources={today.sources} />
+      </Panel>
+      <Panel title="Werk en projectsignalen" description="Projectcontext en expliciete homelab-uitzonderingen." status={today.sections.context.status}>
+        <ItemList items={workSignals} emptyMessage="Geen werk- of projectsignalen in huidige context." />
+        <SourceStates sourceNames={["actions", "projects", "homelab"]} sources={today.sources} />
+      </Panel>
     </section>
 
-    <section className="mt-4 grid items-stretch gap-4 xl:grid-cols-[1.08fr_1fr]">
-      <Panel className="min-h-[180px]" eyebrow="Homelab Status" detail={homelab.available ? `Pulse · ${homelab.last_updated_at}` : "Pulse unavailable · Unknown"}><div className="grid gap-2 sm:grid-cols-3">{homelab.resources.slice(0, 6).map((resource) => <Link className="rounded-md border border-slate-800 bg-slate-950/40 p-3 hover:border-slate-700" href="/homelab" key={resource.id}><p className="truncate text-sm text-slate-200">{resource.name}</p><p className="mt-1 text-xs text-slate-500">{resource.status} · {resource.type}</p></Link>)}{!homelab.resources.length && <p className="text-sm text-slate-500">Pulse unavailable — status Unknown.</p>}</div><Link className="mt-4 inline-block text-sm text-indigo-300 hover:text-indigo-200" href="/homelab">Homelab bekijken →</Link></Panel>
-      <Panel className="min-h-[180px]" eyebrow="Codex Runs"><div className="divide-y divide-slate-800">{runs.slice(0, 5).map((run) => <Link className="block py-3 first:pt-0 last:pb-0 hover:text-indigo-300" href={`/projects/${run.project_id}`} key={run.id}><p className="text-sm text-slate-200">{run.linear_issue || "Unknown"} · {run.status || "Unknown"}</p><p className="mt-1 text-xs text-slate-500">{run.model || "Unknown"} · {run.profile || "Unknown"} · {run.reasoning_level || "Unknown"} · {run.session_type || "Unknown"}</p></Link>)}{!runs.length && <p className="text-sm text-slate-500">Geen lokale Codex-runs.</p>}</div></Panel>
+    <section className="mt-4" aria-labelledby="bronstatus-title">
+      <h2 id="bronstatus-title" className="text-sm font-semibold uppercase tracking-wide text-slate-100">Bronstatussen</h2>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">{Object.entries(today.sources).map(([name, source]) => <SourceState key={name} name={name} source={source} />)}</div>
     </section>
   </main>;
 }
 
-function formatTime(value: string) { return new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
-function formatActivityTime(value: string) { return new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
-
-function Panel({ eyebrow, detail, count, className = "", children }: { eyebrow: string; detail?: string; count?: number | string; className?: string; children: React.ReactNode }) {
-  return <section className={`h-full rounded-lg border border-slate-800 bg-[#0c121c]/80 p-4 ${className}`}><header className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold uppercase tracking-wide text-slate-100">{eyebrow}</h2>{count !== undefined && <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-xs text-indigo-200">{count}</span>}{detail && <span className="text-xs text-slate-500">{detail}</span>}</header><div className="mt-4">{children}</div></section>;
+function TodayUnavailable({ error }: { error: string }) {
+  return <main className="mx-auto max-w-7xl px-5 py-5 sm:px-8 lg:px-10">
+    <header className="flex flex-wrap items-start justify-between gap-5"><div><h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">Vandaag</h1><p className="mt-1 text-sm text-slate-400">Persoonlijke briefing niet beschikbaar.</p></div><LocalClock /></header>
+    <section className="mt-5 rounded-lg border border-red-400/35 bg-red-400/10 p-5" aria-labelledby="today-fout-title"><h2 id="today-fout-title" className="text-lg font-semibold text-red-100">Today-bron mislukt</h2><p className="mt-2 text-sm text-red-100">{error}</p><p className="mt-2 text-sm text-slate-300">Geen oude of lege data getoond.</p></section>
+  </main>;
 }
+
+function Panel({ title, description, status, children }: { title: string; description: string; status: TodayStatus; children: React.ReactNode }) {
+  return <section className="h-full rounded-lg border border-slate-800 bg-[#0c121c]/80 p-4">
+    <header className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-sm font-semibold uppercase tracking-wide text-slate-100">{title}</h2><p className="mt-1 text-xs text-slate-500">{description}</p></div><StateBadge status={status} /></header>
+    <div className="mt-4">{children}</div>
+  </section>;
+}
+
+function SectionItems({ label, section, emptyMessage }: { label: string; section: TodaySection; emptyMessage: string }) {
+  return <div className="mt-4 first:mt-0"><div className="flex items-center justify-between gap-3"><h3 className="text-sm font-medium text-slate-200">{label}</h3><StateBadge status={section.status} /></div><div className="mt-2"><ItemList items={section.items} emptyMessage={emptyMessage} /></div></div>;
+}
+
+function ItemList({ items, emptyMessage }: { items: TodayItem[]; emptyMessage: string }) {
+  if (!items.length) return <p className="text-sm text-slate-500">{emptyMessage}</p>;
+  return <ul className="divide-y divide-slate-800">{items.map((item) => <li key={`${item.source}:${item.id}`} className="py-3 first:pt-0 last:pb-0"><TodayItemRow item={item} /></li>)}</ul>;
+}
+
+function TodayItemRow({ item }: { item: TodayItem }) {
+  const href = hrefForItem(item);
+  const body = <><h3 className="font-medium text-slate-100">{item.title}</h3><p className="mt-1 text-xs text-slate-400">{itemDetail(item)}</p></>;
+  if (!href) return <div>{body}</div>;
+  return <Link className="block rounded-md outline-none transition hover:bg-slate-900/50 focus-visible:ring-2 focus-visible:ring-indigo-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0c121c]" href={href}>{body}</Link>;
+}
+
+function SourceStates({ sourceNames, sources }: { sourceNames: string[]; sources: TodayView["sources"] }) {
+  return <div className="mt-4 flex flex-wrap gap-2">{sourceNames.map((name) => sources[name] && <SourceState compact key={name} name={name} source={sources[name]} />)}</div>;
+}
+
+function SourceState({ name, source, compact = false }: { name: string; source: TodayView["sources"][string]; compact?: boolean }) {
+  const statusMessage = source.status === "empty" ? "Bron reageerde, zonder resultaten." : source.status === "not_configured" ? "Bron is niet ingesteld; dit is geen lege uitkomst." : source.status === "stale" ? "Bron leverde verouderde data." : source.status === "unavailable" ? source.error ?? "Bron is tijdelijk niet bereikbaar." : source.status === "error" ? source.error ?? "Bronverwerking is mislukt." : source.status === "partial" ? "Bron leverde gedeeltelijke data." : `${source.item_count} item${source.item_count === 1 ? "" : "s"}.`;
+  return <div className={`rounded-md border px-3 py-2 ${stateStyles[source.status]}`} data-source-state={source.status}><div className="flex items-center justify-between gap-3"><p className="text-xs font-medium">{sourceLabels[name] ?? name}</p><StateBadge status={source.status} /></div>{!compact && <p className="mt-1 text-xs opacity-80">{statusMessage}</p>}</div>;
+}
+
+function StateBadge({ status }: { status: TodayStatus }) { return <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs ${stateStyles[status]}`}>{stateLabels[status]}</span>; }
+
+function hrefForItem(item: TodayItem) {
+  if (item.kind === "action") return `/actions/${item.id}`;
+  if (item.kind === "status_card") return `/status-cards/${item.id}`;
+  if (item.kind === "project") return `/projects/${item.id}`;
+  if (item.kind === "homelab_exception") return "/homelab";
+  return null;
+}
+
+function itemDetail(item: TodayItem) {
+  if (item.kind === "calendar_event") return formatTime(stringValue(item.details.starts_at)) ?? "Agenda-afspraak";
+  if (item.kind === "routine") return item.reminder_time ? `Herinnering ${item.reminder_time.slice(0, 5)}` : "Vandaag";
+  if (item.kind === "health_weight") return typeof item.details.normalized_kg === "number" ? `${item.details.normalized_kg.toLocaleString("nl-NL")} kg` : "Gewichtsmeting";
+  if (item.kind === "health_activity") return activityDetail(item.details);
+  if (item.kind === "project") return [item.status, stringValue(item.details.personal_status)].filter(Boolean).join(" · ") || "Project";
+  if (item.kind === "homelab_exception") return [item.status, stringValue(item.details.type)].filter(Boolean).join(" · ") || "Homelab-uitzondering";
+  return [item.domain, item.status, stringValue(item.details.priority)].filter(Boolean).join(" · ") || "Actie";
+}
+
+function activityDetail(details: Record<string, unknown>) {
+  const duration = typeof details.duration_seconds === "number" ? `${Math.round(details.duration_seconds / 60)} min` : null;
+  const distance = typeof details.distance_meters === "number" ? `${(details.distance_meters / 1000).toLocaleString("nl-NL", { maximumFractionDigits: 1 })} km` : null;
+  return [duration, distance].filter(Boolean).join(" · ") || "Activiteit";
+}
+
+function stringValue(value: unknown) { return typeof value === "string" && value ? value : null; }
+
+function formatDate(value: string) { return new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long", timeZone: "Europe/Amsterdam" }).format(new Date(`${value}T12:00:00Z`)); }
+
+function formatDateTime(value: string, timeZone: string) { return new Intl.DateTimeFormat("nl-NL", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone }).format(new Date(value)); }
+
+function formatTime(value: string | null) { return value ? new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Amsterdam" }).format(new Date(value)) : null; }
