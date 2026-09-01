@@ -10,7 +10,7 @@ import os
 import secrets
 from typing import Any
 from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.request import Request as UrlRequest, urlopen
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -83,7 +83,7 @@ def pulse_homelab() -> dict:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     def get_json(path: str) -> dict:
-        with urlopen(Request(f"{base_url}{path}", headers=headers), timeout=5) as response:
+        with urlopen(UrlRequest(f"{base_url}{path}", headers=headers), timeout=5) as response:
             import json
 
             return json.loads(response.read().decode("utf-8"))
@@ -375,6 +375,56 @@ class AssetPatch(BaseModel):
     environment: str | None = None
     status: AssetStatus | None = None
     notes: str | None = None
+
+
+class TodayStatus(str, Enum):
+    AVAILABLE = "available"
+    EMPTY = "empty"
+    PARTIAL = "partial"
+    ERROR = "error"
+    NOT_CONFIGURED = "not_configured"
+    UNAVAILABLE = "unavailable"
+
+
+class TodaySourceInfo(BaseModel):
+    status: TodayStatus
+    item_count: int = Field(ge=0)
+    error: str | None = None
+
+
+class TodayItem(BaseModel):
+    id: str
+    kind: str
+    source: str
+    title: str
+    domain: str | None = None
+    status: str | None = None
+    due_date: date | None = None
+    reminder_time: time | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class TodaySection(BaseModel):
+    status: TodayStatus
+    items: list[TodayItem]
+    source_status: dict[str, TodayStatus]
+    error: str | None = None
+
+
+class TodaySections(BaseModel):
+    overdue: TodaySection
+    today: TodaySection
+    routines: TodaySection
+    upcoming: TodaySection
+    context: TodaySection
+
+
+class TodayViewModel(BaseModel):
+    generated_at: datetime
+    timezone: str
+    local_date: date
+    sources: dict[str, TodaySourceInfo]
+    sections: TodaySections
 
 
 class WeightUnit(str, Enum):
@@ -2200,3 +2250,377 @@ def update_asset(asset_id: str, asset: AssetPatch, connection: psycopg.Connectio
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
     return updated
+
+
+def _today_text(value: object) -> str:
+    if isinstance(value, Enum):
+        return str(value.value)
+    return value if isinstance(value, str) and value else "Unknown"
+
+
+def _today_date(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.astimezone(PRODUCT_TIMEZONE).date() if value.tzinfo else value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _today_time(value: object) -> time | None:
+    if isinstance(value, time):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return time.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _today_source(
+    status_value: TodayStatus, item_count: int, error: str | None = None
+) -> TodaySourceInfo:
+    return TodaySourceInfo(status=status_value, item_count=item_count, error=error)
+
+
+def _today_db_source(name: str, loader: Any, connection: psycopg.Connection) -> tuple[list[dict], TodaySourceInfo]:
+    try:
+        records = loader(connection)
+    except psycopg.Error:
+        return [], _today_source(TodayStatus.ERROR, 0, f"{name} source unavailable")
+    return records, _today_source(TodayStatus.AVAILABLE if records else TodayStatus.EMPTY, len(records))
+
+
+def _today_section(
+    items: list[TodayItem], source_names: list[str], sources: dict[str, TodaySourceInfo]
+) -> TodaySection:
+    source_status = {name: sources[name].status for name in source_names}
+    failures = [source.status for source in (sources[name] for name in source_names) if source.status in {
+        TodayStatus.ERROR,
+        TodayStatus.UNAVAILABLE,
+        TodayStatus.NOT_CONFIGURED,
+    }]
+    if items:
+        section_status = TodayStatus.PARTIAL if failures else TodayStatus.AVAILABLE
+    elif TodayStatus.ERROR in failures:
+        section_status = TodayStatus.ERROR
+    elif TodayStatus.UNAVAILABLE in failures:
+        section_status = TodayStatus.UNAVAILABLE
+    elif TodayStatus.NOT_CONFIGURED in failures:
+        section_status = TodayStatus.NOT_CONFIGURED
+    else:
+        section_status = TodayStatus.EMPTY
+    errors = [sources[name].error for name in source_names if sources[name].error]
+    return TodaySection(
+        status=section_status,
+        items=items,
+        source_status=source_status,
+        error="; ".join(errors) if errors else None,
+    )
+
+
+def _today_action_item(action: dict) -> TodayItem:
+    due_date = _today_date(action.get("due_date"))
+    return TodayItem(
+        id=_today_text(action.get("id")),
+        kind="action",
+        source="actions",
+        title=_today_text(action.get("title")),
+        domain=_today_text(action.get("domain")),
+        status=_today_text(action.get("status")),
+        due_date=due_date,
+        details={
+            "type": _today_text(action.get("type")),
+            "priority": _today_text(action.get("priority")),
+            "project_id": action.get("project_id"),
+            "status_card_id": action.get("status_card_id"),
+        },
+    )
+
+
+def _today_action_sort_key(action: dict) -> tuple:
+    due_date = _today_date(action.get("due_date")) or date.max
+    return (
+        due_date,
+        _today_text(action.get("priority")).casefold(),
+        _today_text(action.get("title")).casefold(),
+        _today_text(action.get("id")),
+    )
+
+
+def _today_status_card_item(card: dict) -> TodayItem:
+    return TodayItem(
+        id=_today_text(card.get("id")),
+        kind="status_card",
+        source="status_cards",
+        title=_today_text(card.get("title")),
+        status=_today_text(card.get("status")),
+        details={
+            "project_id": card.get("project_id"),
+            "facts": _today_text(card.get("facts")),
+            "interpretation": _today_text(card.get("interpretation")),
+            "next_safe_step": _today_text(card.get("next_safe_step")),
+            "source_type": _today_text(card.get("source_type")),
+            "source_reference": _today_text(card.get("source_reference")),
+        },
+    )
+
+
+def _today_health_items(weights: list[dict], activities: list[dict]) -> list[TodayItem]:
+    weights = sorted(weights, key=lambda record: _today_text(record.get("id")))
+    weights = sorted(weights, key=lambda record: str(record.get("measured_at") or ""), reverse=True)
+    activities = sorted(activities, key=lambda record: _today_text(record.get("id")))
+    activities = sorted(activities, key=lambda record: str(record.get("started_at") or ""), reverse=True)
+    items: list[TodayItem] = []
+    for weight in weights[:5]:
+        items.append(
+            TodayItem(
+                id=_today_text(weight.get("id")),
+                kind="health_weight",
+                source="health",
+                title="Gewicht",
+                details={
+                    "measured_at": weight.get("measured_at"),
+                    "normalized_kg": weight.get("normalized_kg"),
+                    "source": _today_text(weight.get("source")),
+                },
+            )
+        )
+    for activity in activities[:5]:
+        items.append(
+            TodayItem(
+                id=_today_text(activity.get("id")),
+                kind="health_activity",
+                source="health",
+                title=_today_text(activity.get("activity_type")),
+                details={
+                    "started_at": activity.get("started_at"),
+                    "ended_at": activity.get("ended_at"),
+                    "duration_seconds": activity.get("duration_seconds"),
+                    "distance_meters": activity.get("distance_meters"),
+                    "energy_kilocalories": activity.get("energy_kilocalories"),
+                    "source": _today_text(activity.get("source")),
+                },
+            )
+        )
+    return items
+
+
+def _today_calendar_items(events: list[dict[str, str]], local_date: date) -> tuple[list[TodayItem], list[TodayItem]]:
+    today: list[TodayItem] = []
+    upcoming: list[TodayItem] = []
+    for event in events:
+        starts_at = event.get("starts_at", "")
+        try:
+            parsed = datetime.fromisoformat(starts_at.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        event_date = parsed.astimezone(PRODUCT_TIMEZONE).date() if parsed.tzinfo else parsed.date()
+        item = TodayItem(
+            id=f"{starts_at}:{_today_text(event.get('summary'))}",
+            kind="calendar_event",
+            source="calendar",
+            title=_today_text(event.get("summary")),
+            details={"starts_at": starts_at},
+        )
+        if event_date == local_date:
+            today.append(item)
+        elif event_date > local_date:
+            upcoming.append(item)
+    return today, upcoming
+
+
+def _today_project_item(project: dict) -> TodayItem:
+    return TodayItem(
+        id=_today_text(project.get("slug")),
+        kind="project",
+        source="projects",
+        title=_today_text(project.get("display_name") or project.get("name")),
+        status=_today_text(project.get("status")),
+        details={
+            "product_key": _today_text(project.get("product_key")),
+            "personal_status": _today_text(project.get("personal_status")),
+            "source_type": _today_text(project.get("source_type")),
+        },
+    )
+
+
+def _today_homelab_item(resource: dict) -> TodayItem:
+    return TodayItem(
+        id=_today_text(resource.get("id")),
+        kind="homelab_exception",
+        source="homelab",
+        title=_today_text(resource.get("name")),
+        status=_today_text(resource.get("status")),
+        details={
+            "type": _today_text(resource.get("type")),
+            "parent_name": _today_text(resource.get("parent_name")),
+            "last_seen": _today_text(resource.get("last_seen")),
+            "updated_at": _today_text(resource.get("updated_at")),
+        },
+    )
+
+
+def _today_is_homelab_exception(status_value: str) -> bool:
+    return status_value.casefold() in {
+        "error", "fout", "offline", "down", "critical", "degraded", "warning",
+        "let op", "actie nodig", "geblokkeerd", "unhealthy",
+    }
+
+
+def build_today_view(connection: psycopg.Connection, now: datetime | None = None) -> TodayViewModel:
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("Today aggregation requires an aware datetime")
+    local_date = current.astimezone(PRODUCT_TIMEZONE).date()
+
+    actions, actions_source = _today_db_source(
+        "actions", lambda db: list_actions(domain=None, connection=db), connection
+    )
+    routines, routines_source = _today_db_source(
+        "routines", lambda db: due_routines_for_date(db, local_date), connection
+    )
+    projects, projects_source = _today_db_source("projects", list_projects, connection)
+    cards, cards_source = _today_db_source("status_cards", list_status_cards, connection)
+    weights, weights_source = _today_db_source("health_weights", list_health_weights, connection)
+    activities, activities_source = _today_db_source("health_activities", list_health_activities, connection)
+
+    health_error = "; ".join(source.error for source in (weights_source, activities_source) if source.error)
+    health_count = len(weights) + len(activities)
+    health_source = _today_source(
+        TodayStatus.ERROR if health_error else (TodayStatus.AVAILABLE if health_count else TodayStatus.EMPTY),
+        health_count,
+        health_error or None,
+    )
+
+    try:
+        calendar_result = calendar_schedule()
+    except (OSError, UnicodeDecodeError, URLError, ValueError):
+        calendar_result = {"status": "Onbekend", "events": []}
+    if not os.environ.get("GOOGLE_CALENDAR_ICS_URL"):
+        calendar_source = _today_source(TodayStatus.NOT_CONFIGURED, 0)
+        calendar_events: list[dict[str, str]] = []
+    elif calendar_result.get("status") != "Beschikbaar":
+        calendar_source = _today_source(TodayStatus.UNAVAILABLE, 0, "calendar source unavailable")
+        calendar_events = []
+    else:
+        calendar_events = calendar_result.get("events", [])
+        calendar_source = _today_source(
+            TodayStatus.AVAILABLE if calendar_events else TodayStatus.EMPTY, len(calendar_events)
+        )
+
+    try:
+        pulse_result = pulse_homelab()
+    except (OSError, UnicodeDecodeError, URLError, ValueError):
+        pulse_result = {"available": False, "resources": []}
+    if not os.environ.get("PULSE_BASE_URL"):
+        homelab_source = _today_source(TodayStatus.NOT_CONFIGURED, 0)
+        homelab_resources: list[dict] = []
+    elif not pulse_result.get("available"):
+        homelab_source = _today_source(TodayStatus.UNAVAILABLE, 0, "homelab source unavailable")
+        homelab_resources = []
+    else:
+        homelab_resources = pulse_result.get("resources", [])
+        homelab_source = _today_source(
+            TodayStatus.AVAILABLE if homelab_resources else TodayStatus.EMPTY, len(homelab_resources)
+        )
+
+    sources = {
+        "actions": _today_source(
+            actions_source.status
+            if actions_source.error
+            else (
+                TodayStatus.AVAILABLE
+                if any(_today_text(action.get("status")) != ActionStatus.DONE.value for action in actions)
+                else TodayStatus.EMPTY
+            ),
+            sum(_today_text(action.get("status")) != ActionStatus.DONE.value for action in actions),
+            actions_source.error,
+        ),
+        "routines": routines_source,
+        "health": health_source,
+        "projects": projects_source,
+        "status_cards": cards_source,
+        "homelab": homelab_source,
+        "calendar": calendar_source,
+    }
+
+    active_actions = [action for action in actions if _today_text(action.get("status")) != ActionStatus.DONE.value]
+    personal_actions = [
+        action for action in active_actions if _today_text(action.get("domain")) != ActionDomain.PROJECT.value
+    ]
+    project_actions = [
+        action for action in active_actions if _today_text(action.get("domain")) == ActionDomain.PROJECT.value
+    ]
+    overdue_actions = [action for action in personal_actions if (_today_date(action.get("due_date")) or date.max) < local_date]
+    today_actions = [action for action in personal_actions if _today_date(action.get("due_date")) == local_date]
+    upcoming_actions = [action for action in personal_actions if (_today_date(action.get("due_date")) or date.min) > local_date]
+    context_actions = [
+        action for action in personal_actions if action not in overdue_actions + today_actions + upcoming_actions
+    ] + project_actions
+
+    overdue_items = [_today_action_item(action) for action in sorted(overdue_actions, key=_today_action_sort_key)]
+    card_items = [
+        _today_status_card_item(card)
+        for card in cards
+        if card.get("resolved_at") is None
+        and _today_text(card.get("status")) in {StatusCardStatus.ACTION_NEEDED.value, StatusCardStatus.BLOCKED.value}
+    ]
+    card_items.sort(key=lambda item: (0 if item.status == StatusCardStatus.BLOCKED.value else 1, item.title.casefold(), item.id))
+    overdue_items = card_items + overdue_items
+
+    today_items = [_today_action_item(action) for action in sorted(today_actions, key=_today_action_sort_key)]
+    calendar_today, calendar_upcoming = _today_calendar_items(calendar_events, local_date)
+    calendar_today.sort(key=lambda item: (item.details.get("starts_at", ""), item.title.casefold(), item.id))
+    calendar_upcoming.sort(key=lambda item: (item.details.get("starts_at", ""), item.title.casefold(), item.id))
+    today_items.extend(calendar_today)
+    upcoming_items = [_today_action_item(action) for action in sorted(upcoming_actions, key=_today_action_sort_key)]
+    upcoming_items.extend(calendar_upcoming)
+
+    routine_items = sorted(
+        [
+            TodayItem(
+                id=_today_text(routine.get("id")),
+                kind="routine",
+                source="routines",
+                title=_today_text(routine.get("title")),
+                due_date=local_date,
+                reminder_time=_today_time(routine.get("reminder_time")),
+                details={"frequency": _today_text(routine.get("frequency")), "completed": False},
+            )
+            for routine in routines
+        ],
+        key=lambda item: (item.reminder_time or time.max, item.title.casefold(), item.id),
+    )
+    context_items = [_today_action_item(action) for action in sorted(context_actions, key=_today_action_sort_key)]
+    context_items.extend(_today_health_items(weights, activities))
+    context_items.extend(_today_project_item(project) for project in projects)
+    context_items.extend(
+        _today_homelab_item(resource)
+        for resource in homelab_resources
+        if _today_is_homelab_exception(_today_text(resource.get("status")))
+    )
+
+    return TodayViewModel(
+        generated_at=current.astimezone(UTC),
+        timezone="Europe/Amsterdam",
+        local_date=local_date,
+        sources=sources,
+        sections=TodaySections(
+            overdue=_today_section(overdue_items, ["actions", "status_cards"], sources),
+            today=_today_section(today_items, ["actions", "calendar"], sources),
+            routines=_today_section(routine_items, ["routines"], sources),
+            upcoming=_today_section(upcoming_items, ["actions", "calendar"], sources),
+            context=_today_section(context_items, ["actions", "health", "projects", "homelab"], sources),
+        ),
+    )
+
+
+@app.get("/api/today", response_model=TodayViewModel)
+def today(connection: psycopg.Connection = Depends(get_connection)) -> TodayViewModel:
+    return build_today_view(connection)
