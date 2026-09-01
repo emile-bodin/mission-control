@@ -1,68 +1,112 @@
 import Link from "next/link";
 import { LocalClock } from "./local-clock";
 
-type Project = { name: string; slug: string; display_name: string; product_key: string; status: string; personal_status: string };
-type StatusCard = { id: string; project_id: string | null; title: string; status: "OK" | "Let op" | "Actie nodig" | "Geblokkeerd" | "Onbekend"; facts: string; interpretation: string; next_safe_step: string; source_type: string; updated_at: string; resolved_at: string | null };
+type StatusCard = { id: string; title: string; status: "OK" | "Let op" | "Actie nodig" | "Geblokkeerd" | "Onbekend"; next_safe_step: string; resolved_at: string | null };
 type Action = { id: string; title: string; status: "Open" | "Bezig" | "Klaar" | "Later"; priority: string; due_date: string | null; updated_at: string };
-type Asset = { id: string; name: string; type: string; status: string; notes: string };
 type CalendarEvent = { starts_at: string; summary: string };
 type Schedule = { status: string; events: CalendarEvent[] };
+type Project = { slug: string; display_name: string; status: string; personal_status: string };
+type Asset = { id: string; name: string; status: "Onbekend" | "OK" | "Let op" | "Fout" };
+type Weight = { id: string; measured_at: string; normalized_kg: number };
+type Activity = { id: string; activity_type: string; started_at: string; duration_seconds: number | null };
 
 export const dynamic = "force-dynamic";
 
-export default async function TodayPage() {
-  const [projectsResponse, cardsResponse, actionsResponse, assetsResponse, scheduleResponse] = await Promise.all([
-    fetch("http://backend:8000/api/projects", { cache: "no-store" }),
-    fetch("http://backend:8000/api/status-cards", { cache: "no-store" }),
-    fetch("http://backend:8000/api/actions", { cache: "no-store" }),
-    fetch("http://backend:8000/api/assets", { cache: "no-store" }),
-    fetch("http://backend:8000/api/calendar/schedule", { cache: "no-store" })
-  ]);
-  const projects: Project[] = projectsResponse.ok ? await projectsResponse.json() : [];
-  const cards: StatusCard[] = cardsResponse.ok ? await cardsResponse.json() : [];
-  const actions: Action[] = actionsResponse.ok ? await actionsResponse.json() : [];
-  const assets: Asset[] = assetsResponse.ok ? await assetsResponse.json() : [];
-  const schedule: Schedule = scheduleResponse.ok ? await scheduleResponse.json() : { status: "Onbekend", events: [] };
-  const openCards = cards.filter((card) => !card.resolved_at);
-  const needsAttention = openCards.filter((card) => card.status === "Actie nodig" || card.status === "Geblokkeerd");
-  const openActions = actions.filter((action) => action.status !== "Klaar");
-  const recentActivity = [
-    ...cards.map((card) => ({ id: `card-${card.id}`, href: `/status-cards/${card.id}`, title: card.title, detail: `Statuskaart · ${card.status}`, updatedAt: card.updated_at })),
-    ...actions.map((action) => ({ id: `action-${action.id}`, href: `/actions/${action.id}`, title: action.title, detail: `Actie · ${action.status}`, updatedAt: action.updated_at }))
-  ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5);
+const backend = "http://backend:8000";
 
-  return <main className="mx-auto max-w-7xl px-5 py-5 sm:px-8 lg:px-10">
-    <header className="flex flex-wrap items-center justify-between gap-5">
-      <div><h1 className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">Goedendag.</h1><p className="mt-1 text-sm text-slate-400">Dit is wat vandaag aandacht vraagt.</p></div>
-      <div className="flex items-center gap-3"><span className="rounded-md border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 text-xs text-emerald-300">Local</span><LocalClock /></div>
+async function getJson<T>(path: string, fallback: T): Promise<T> {
+  try {
+    const response = await fetch(`${backend}${path}`, { cache: "no-store" });
+    return response.ok ? await response.json() : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export default async function TodayPage() {
+  const [cards, actions, schedule, projects, assets, weights, activities] = await Promise.all([
+    getJson<StatusCard[]>("/api/status-cards", []),
+    getJson<Action[]>("/api/actions", []),
+    getJson<Schedule>("/api/calendar/schedule", { status: "Onbekend", events: [] }),
+    getJson<Project[]>("/api/projects", []),
+    getJson<Asset[]>("/api/assets", []),
+    getJson<Weight[]>("/api/health/weights", []),
+    getJson<Activity[]>("/api/health/activities", [])
+  ]);
+
+  const openActions = actions.filter((action) => action.status !== "Klaar").sort(compareActions);
+  const nextEvents = schedule.events.filter((event) => new Date(event.starts_at) >= new Date()).sort((a, b) => a.starts_at.localeCompare(b.starts_at)).slice(0, 4);
+  const openCards = cards.filter((card) => !card.resolved_at);
+  const activeProjects = projects.filter((project) => isActive(project.status) || isActive(project.personal_status)).slice(0, 3);
+  const latestWeight = weights[0];
+  const latestActivity = activities[0];
+  const attentionCount = openCards.filter((card) => card.status === "Actie nodig" || card.status === "Geblokkeerd").length;
+  const pulseOk = assets.filter((asset) => asset.status === "OK").length;
+  const calendarConnected = schedule.status === "Beschikbaar";
+
+  return <main className="mx-auto max-w-[1440px] px-5 py-8 sm:px-8 lg:px-10 lg:py-9">
+    <header className="flex flex-wrap items-start justify-between gap-6">
+      <div><p className="text-sm font-medium text-indigo-300">Vandaag</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-white sm:text-4xl">Goedenavond, Emile <span aria-hidden="true">👋</span></h1><p className="mt-2 text-sm text-slate-400">Hier is je overzicht voor vandaag.</p></div>
+      <LocalClock />
     </header>
 
-    <section className="mt-4 grid gap-4 xl:grid-cols-[1.06fr_0.96fr_1.08fr]">
-      <Panel eyebrow="Quick Capture"><div className="space-y-3"><textarea aria-label="Quick Capture" className="min-h-24 resize-none border-slate-700 bg-slate-950/60 text-slate-500" placeholder="Inbox-opslag Unknown — capture is nog niet beschikbaar." readOnly /><div className="flex items-center justify-between gap-3"><p className="text-xs text-slate-500">Nieuwe captures horen in Inbox. Lokale Inbox-opslag ontbreekt.</p><button className="shrink-0 rounded-md border border-slate-700 px-3 py-2 text-sm text-slate-600" disabled>Opslaan</button></div></div></Panel>
-      <Panel eyebrow="Today / Focus"><div className="space-y-3">{openActions.slice(0, 4).map((action) => <Link className="flex gap-3 text-sm text-slate-200 hover:text-indigo-300" href={`/actions/${action.id}`} key={action.id}><span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full border border-indigo-400" /><span>{action.title}<span className="block text-xs text-slate-500">{action.status} · {action.priority}</span></span></Link>)}{!openActions.length && <p className="text-sm text-slate-500">Geen open lokale acties.</p>}<Link className="inline-block text-sm text-indigo-300 hover:text-indigo-200" href="/actions">Alle acties →</Link></div></Panel>
-      <Panel eyebrow="Schedule" detail={schedule.status === "Beschikbaar" ? "Private ICS · read-only" : "Unknown/onbekend"}><div className="space-y-3">{schedule.events.slice(0, 4).map((event) => <div className="flex gap-4 text-sm" key={`${event.starts_at}-${event.summary}`}><time className="w-12 shrink-0 font-medium text-slate-300">{formatTime(event.starts_at)}</time><p className="text-slate-200">{event.summary}</p></div>)}{!schedule.events.length && <p className="text-sm text-slate-500">Agenda niet beschikbaar. Geen aannames gemaakt.</p>}</div></Panel>
-    </section>
+    <div className="mt-8 grid items-stretch gap-5 xl:grid-cols-2">
+      <Panel title="AI Brief" icon="✦" className="min-h-[20rem]">
+        <span className="inline-flex rounded-lg bg-indigo-500/15 px-2.5 py-1 text-xs font-medium text-indigo-300">✦ Top inzichten</span>
+        <ul className="mt-5 space-y-3 text-sm text-slate-300">
+          <Insight>{openActions.length ? `${openActions.length} open taak${openActions.length === 1 ? "" : "en"}${attentionCount ? ` · ${attentionCount} vraagt aandacht` : ""}.` : "Open taken: geen bekend."}</Insight>
+          <Insight>{latestWeight ? `Laatste gewicht: ${latestWeight.normalized_kg.toFixed(1)} kg.` : "Health sync: Unknown."}</Insight>
+          <Insight>{activeProjects.length ? `${activeProjects.length} actief project${activeProjects.length === 1 ? "" : "en"} bekend.` : "Projectstatus: Unknown."}</Insight>
+          <Insight>{assets.length ? `Pulse: ${pulseOk} van ${assets.length} assets met status OK.` : "Pulse status: Unknown."}</Insight>
+        </ul>
+        <p className="mt-auto pt-10 text-xs text-slate-500">Statische samenvatting op basis van beschikbare dashboarddata.</p>
+      </Panel>
 
-    <section className="mt-4 grid items-stretch gap-4 xl:grid-cols-[1.38fr_1fr]">
-      <Panel className="min-h-[220px]" eyebrow="Needs Attention" count={needsAttention.length}><div className="divide-y divide-slate-800">{needsAttention.map((card) => <Link className="block py-4 first:pt-0 last:pb-0 hover:bg-slate-900/40" href={`/status-cards/${card.id}`} key={card.id}><div className="flex items-start gap-3"><span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${card.status === "Geblokkeerd" ? "bg-red-400" : "bg-amber-400"}`} /><div className="min-w-0"><h3 className="font-medium text-slate-100">{card.title}</h3><p className="mt-2 text-sm text-slate-300"><span className="text-slate-500">Feit:</span> {card.facts}</p><p className="mt-1 text-sm text-slate-300"><span className="text-slate-500">Interpretatie:</span> {card.interpretation}</p><p className="mt-1 text-sm text-slate-300"><span className="text-slate-500">Volgende veilige stap:</span> {card.next_safe_step}</p></div></div></Link>)}{!needsAttention.length && <p className="text-sm text-slate-500">Geen lokale kaarten met Actie nodig of Geblokkeerd.</p>}</div></Panel>
-      <Panel className="min-h-[220px]" eyebrow="Inbox" count="Unknown"><p className="text-sm text-slate-500">Inbox-opslag is niet aanwezig in bestaande BCC-data. Nieuwe captures kunnen daarom niet veilig worden bewaard.</p></Panel>
-    </section>
+      <Panel title="Agenda" icon="□" action={<Link className="link" href="/agenda">Volledige agenda</Link>}>
+        {calendarConnected && nextEvents.length ? <div className="space-y-2">{nextEvents.map((event) => <article className="grid grid-cols-[5.4rem_1fr] gap-4 rounded-xl bg-slate-900/65 px-3 py-3" key={`${event.starts_at}-${event.summary}`}><time className="text-xs font-medium leading-5 text-slate-300"><span className="block">{formatDate(event.starts_at)}</span><span className="block text-sm text-white">{formatClock(event.starts_at)}</span></time><div><h3 className="font-medium text-slate-100">{event.summary}</h3><p className="mt-1 text-xs text-slate-500">Agenda-item</p></div></article>)}</div> : <CalendarPlaceholder connected={calendarConnected} />}
+      </Panel>
 
-    <section className="mt-4 grid items-stretch gap-4 xl:grid-cols-[1.38fr_1fr]">
-      <Panel eyebrow="Projects"><div className="divide-y divide-slate-800">{projects.slice(0, 5).map((project) => <Link className="grid grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] items-center gap-4 py-1 text-sm first:pt-0 last:pb-0 hover:text-indigo-300" href={`/projects/${project.slug}`} key={project.slug}><span className="flex min-w-0 items-center gap-3"><span className="grid h-6 w-6 shrink-0 place-items-center rounded border border-slate-700 text-[9px] text-indigo-200">{project.product_key}</span><span className="truncate text-slate-200">{project.display_name}</span></span><span className="truncate text-xs text-slate-500">{project.status} · {project.personal_status}</span></Link>)}{!projects.length && <p className="text-sm text-slate-500">Geen lokale projectrecords.</p>}</div><Link className="mt-2 inline-block text-sm text-indigo-300 hover:text-indigo-200" href="/projects">Alle projecten →</Link></Panel>
-      <Panel eyebrow="Recent Activity"><div className="divide-y divide-slate-800">{recentActivity.map((item) => <Link className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 py-1 first:pt-0 last:pb-0 hover:text-indigo-300" href={item.href} key={item.id}><span className="truncate text-sm text-slate-200">{item.title}</span><time className="text-xs text-slate-500">{formatActivityTime(item.updatedAt)}</time></Link>)}{!recentActivity.length && <p className="text-sm text-slate-500">Geen lokale activiteit beschikbaar.</p>}</div></Panel>
-    </section>
+      <Panel title="Health & History" icon="♡" id="health" action={<span className="text-xs text-slate-500">Historie: Unknown</span>}>
+        <div className="mb-4 flex gap-5 border-b border-slate-800 text-sm"><span className="border-b-2 border-indigo-400 pb-2 text-indigo-300">Overzicht</span><span className="pb-2 text-slate-500">Historie</span></div>
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Metric label="Gewicht" value={latestWeight ? `${latestWeight.normalized_kg.toFixed(1)} kg` : "Unknown"} detail={latestWeight ? `Gemeten ${formatShortDate(latestWeight.measured_at)}` : "Geen syncdata"} />
+          <Metric label="Stappen" value="Unknown" detail="Geen stappenbron" />
+          <Metric label="Activiteit" value={latestActivity ? formatDuration(latestActivity.duration_seconds) : "Unknown"} detail={latestActivity ? latestActivity.activity_type : "Geen syncdata"} />
+        </div>
+        <WeightTrend weights={weights.slice(0, 7).reverse()} />
+      </Panel>
 
-    <section className="mt-4 grid items-stretch gap-4 xl:grid-cols-[1.08fr_1fr]">
-      <Panel className="min-h-[180px]" eyebrow="Homelab Status" detail="Ondersteunend"><div className="grid gap-2 sm:grid-cols-3">{assets.slice(0, 6).map((asset) => <Link className="rounded-md border border-slate-800 bg-slate-950/40 p-3 hover:border-slate-700" href={`/homelab/${asset.id}`} key={asset.id}><p className="truncate text-sm text-slate-200">{asset.name}</p><p className="mt-1 text-xs text-slate-500">{asset.status} · {asset.type}</p></Link>)}{!assets.length && <p className="text-sm text-slate-500">Geen lokale assets.</p>}</div><Link className="mt-4 inline-block text-sm text-indigo-300 hover:text-indigo-200" href="/homelab">Homelab bekijken →</Link></Panel>
-      <Panel className="min-h-[180px]" eyebrow="Codex Runs" detail="Unknown/onbekend"><p className="text-sm text-slate-500">Geen lokale Codex-rungegevens of route beschikbaar.</p></Panel>
+      <Panel title="Open taken" icon="☑" action={<Link className="link" href="/actions">Alle taken</Link>}>
+        <div className="space-y-2">{openActions.slice(0, 5).map((action) => <Link className="grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-3 rounded-xl bg-slate-900/65 px-3 py-3 transition hover:bg-slate-800" href={`/actions/${action.id}`} key={action.id}><span className="h-4 w-4 rounded border border-slate-600" aria-hidden="true" /><span className="min-w-0"><span className="block truncate text-sm font-medium text-slate-100">{action.title}</span><span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium leading-none ${priorityClass(action.priority)}`}>{action.priority || "Unknown"}</span></span><span className="whitespace-nowrap text-xs text-slate-500">{action.due_date ? dueLabel(action.due_date) : "Geen datum"}</span></Link>)}{!openActions.length && <p className="rounded-xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">Geen open taken bekend.</p>}</div>
+        <Link className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-indigo-300 hover:text-indigo-200" href="/actions/new">＋ Nieuwe taak</Link>
+      </Panel>
+    </div>
+
+    <section className="mt-5 grid gap-5 lg:grid-cols-[1.12fr_0.9fr_0.9fr]">
+      <Panel title="Quick Access" className="min-h-[10rem]"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><QuickAccess href="/actions/new" icon="＋" label="Nieuwe taak" /><QuickAccess icon="♡" label="Health loggen" /><QuickAccess icon="▤" label="Nieuwe notitie" /><QuickAccess icon="◎" label="Focus starten" /></div></Panel>
+      <Panel title="Actieve projecten" icon="⌘" action={<Link className="link" href="/projects">Alle projecten</Link>}><div className="space-y-4">{activeProjects.length ? activeProjects.map((project) => <Link className="block" href={`/projects/${project.slug}`} key={project.slug}><div className="flex justify-between gap-3 text-sm"><span className="truncate font-medium text-slate-200">{project.display_name}</span><span className="text-xs text-slate-500">Voortgang: Unknown</span></div><div className="mt-2 h-1.5 rounded-full bg-slate-800" /></Link>) : <UnknownProjects />}</div></Panel>
+      <Panel title="Pulse Overview" action={<Link className="link" href="/homelab">Pulse bekijken</Link>}><div className="space-y-3">{["Proxmox", "PBS Backup", "Home Network"].map((name) => <PulseItem asset={assets.find((item) => item.name.toLowerCase().includes(name.toLowerCase().split(" ")[0].toLowerCase()))} name={name} key={name} />)}</div></Panel>
     </section>
   </main>;
 }
 
-function formatTime(value: string) { return new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
-function formatActivityTime(value: string) { return new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
-
-function Panel({ eyebrow, detail, count, className = "", children }: { eyebrow: string; detail?: string; count?: number | string; className?: string; children: React.ReactNode }) {
-  return <section className={`h-full rounded-lg border border-slate-800 bg-[#0c121c]/80 p-4 ${className}`}><header className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold uppercase tracking-wide text-slate-100">{eyebrow}</h2>{count !== undefined && <span className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-xs text-indigo-200">{count}</span>}{detail && <span className="text-xs text-slate-500">{detail}</span>}</header><div className="mt-4">{children}</div></section>;
+function Panel({ title, icon, action, children, className = "", id }: { title: string; icon?: string; action?: React.ReactNode; children: React.ReactNode; className?: string; id?: string }) {
+  return <section className={`flex h-full flex-col rounded-2xl border border-slate-700/70 bg-[linear-gradient(145deg,rgba(20,30,47,0.96),rgba(13,22,36,0.9))] p-5 shadow-[0_18px_45px_rgba(0,0,0,0.16)] ${className}`} id={id}><header className="mb-5 flex items-center justify-between gap-3"><h2 className="flex items-center gap-3 text-base font-semibold text-white"><span className="text-lg text-slate-300" aria-hidden="true">{icon}</span>{title}</h2>{action}</header>{children}</section>;
 }
+
+function Insight({ children }: { children: React.ReactNode }) { return <li className="flex gap-3"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-400" />{children}</li>; }
+function Metric({ label, value, detail }: { label: string; value: string; detail: string }) { return <article className="rounded-xl bg-slate-900/65 p-3"><p className="text-xs text-slate-400">{label}</p><p className="mt-1 text-xl font-semibold tracking-tight text-white">{value}</p><p className="mt-2 text-xs text-slate-500">{detail}</p></article>; }
+function QuickAccess({ href, icon, label }: { href?: string; icon: string; label: string }) { const content = <><span className="grid h-8 w-8 place-items-center rounded-full bg-indigo-500/20 text-lg text-indigo-300">{icon}</span><span className="text-xs font-medium text-slate-200">{label}</span>{!href && <span className="text-[10px] text-slate-500">Unknown</span>}</>; const className = "flex min-h-24 flex-col items-center justify-center gap-2 rounded-xl bg-slate-900/65 px-2 text-center transition hover:bg-slate-800"; return href ? <Link className={className} href={href}>{content}</Link> : <span className={`${className} cursor-not-allowed opacity-75`} aria-disabled="true">{content}</span>; }
+function CalendarPlaceholder({ connected }: { connected: boolean }) { return <div className="rounded-xl border border-dashed border-slate-700 bg-slate-900/40 p-4"><p className="text-sm font-medium text-slate-300">{connected ? "Geen komende afspraken" : "Agenda niet gekoppeld"}</p><p className="mt-1 text-xs text-slate-500">{connected ? "Geen afspraken in huidige kalenderfeed." : "Google Calendar-status: Unknown."}</p><div className="mt-4 space-y-2 opacity-40" aria-hidden="true"><div className="h-12 rounded-lg bg-slate-800" /><div className="h-12 rounded-lg bg-slate-800" /><div className="h-12 rounded-lg bg-slate-800" /></div></div>; }
+function WeightTrend({ weights }: { weights: Weight[] }) { if (weights.length < 2) return <div className="mt-5 rounded-xl border border-dashed border-slate-700 px-4 py-5 text-xs text-slate-500">Gewichtstrend: Unknown — minimaal twee metingen nodig.</div>; const values = weights.map((weight) => weight.normalized_kg); const min = Math.min(...values); const max = Math.max(...values); const range = max - min || 1; const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${90 - ((value - min) / range) * 65}`).join(" "); return <figure className="mt-5"><figcaption className="mb-2 flex justify-between text-xs text-slate-500"><span>Gewichtstrend</span><span>{min.toFixed(1)}–{max.toFixed(1)} kg</span></figcaption><svg className="h-24 w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Gewichtstrend van beschikbare metingen"><path d="M0 90H100" stroke="currentColor" className="text-slate-700" strokeWidth="1" vectorEffect="non-scaling-stroke" /><polyline points={points} fill="none" stroke="currentColor" className="text-indigo-400" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg><div className="flex justify-between text-[11px] text-slate-600"><span>{formatShortDate(weights[0].measured_at)}</span><span>{formatShortDate(weights[weights.length - 1].measured_at)}</span></div></figure>; }
+function UnknownProjects() { return <>{["Project 1", "Project 2", "Project 3"].map((name) => <div key={name}><div className="flex justify-between text-sm"><span className="text-slate-500">{name}</span><span className="text-xs text-slate-600">Unknown</span></div><div className="mt-2 h-1.5 rounded-full bg-slate-800" /></div>)}</>; }
+function PulseItem({ name, asset }: { name: string; asset?: Asset }) { const label = asset ? pulseLabel(asset.status) : "Unknown"; return <div className="flex items-center justify-between gap-3 text-sm"><span className="text-slate-300">{name}</span><span className={`inline-flex items-center gap-1.5 text-xs ${label === "Online" ? "text-emerald-400" : "text-slate-500"}`}><span className={`h-2 w-2 rounded-full ${label === "Online" ? "bg-emerald-400" : "bg-slate-600"}`} />{label}</span></div>; }
+function compareActions(a: Action, b: Action) { return (a.due_date || "9999-12-31").localeCompare(b.due_date || "9999-12-31") || a.updated_at.localeCompare(b.updated_at); }
+function isActive(value: string) { return value.toLowerCase() === "active"; }
+function pulseLabel(status: Asset["status"]) { return status === "OK" ? "Online" : status === "Onbekend" ? "Unknown" : status; }
+function priorityClass(priority: string) { const value = priority.toLowerCase(); return value.includes("high") || value.includes("hoog") ? "bg-red-500/15 text-red-300" : value.includes("medium") || value.includes("middel") ? "bg-amber-500/15 text-amber-300" : value.includes("low") || value.includes("laag") ? "bg-blue-500/15 text-blue-300" : "bg-slate-700 text-slate-300"; }
+function formatDate(value: string) { return new Intl.DateTimeFormat("nl-NL", { weekday: "short", day: "numeric", month: "short", timeZone: "Europe/Amsterdam" }).format(new Date(value)); }
+function formatClock(value: string) { return new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Amsterdam" }).format(new Date(value)); }
+function formatShortDate(value: string) { return new Intl.DateTimeFormat("nl-NL", { day: "numeric", month: "short", timeZone: "Europe/Amsterdam" }).format(new Date(value)); }
+function dueLabel(value: string) { return new Intl.DateTimeFormat("nl-NL", { day: "numeric", month: "short", timeZone: "Europe/Amsterdam" }).format(new Date(`${value}T12:00:00Z`)); }
+function formatDuration(value: number | null) { return value === null ? "Unknown" : `${Math.max(0, Math.round(value / 60))} min`; }
