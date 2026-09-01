@@ -47,6 +47,12 @@ class ActionStatus(str, Enum):
     LATER = "Later"
 
 
+class ActionDomain(str, Enum):
+    ADMINISTRATION = "administratie"
+    HOUSEHOLD = "huis_gezin"
+    PROJECT = "project"
+
+
 class AssetStatus(str, Enum):
     UNKNOWN = "Onbekend"
     OK = "OK"
@@ -197,6 +203,8 @@ class ActionInput(BaseModel):
     project_id: str | None = None
     status_card_id: str | None = None
     due_date: date | None = None
+    domain: ActionDomain = ActionDomain.PROJECT
+    owner_id: str | None = None
 
 
 class ActionPatch(BaseModel):
@@ -209,6 +217,8 @@ class ActionPatch(BaseModel):
     project_id: str | None = None
     status_card_id: str | None = None
     due_date: date | None = None
+    domain: ActionDomain = Field(default=None)
+    owner_id: str | None = None
 
 
 class AssetInput(BaseModel):
@@ -394,7 +404,7 @@ ASSET_COLUMNS = """
 
 
 ACTION_COLUMNS = """
-    id, title, type, status, priority, project_id, status_card_id, due_date, created_at, updated_at
+    id, title, type, status, priority, project_id, status_card_id, due_date, domain, owner_id, created_at, updated_at
 """
 
 HEALTH_WEIGHT_COLUMNS = """
@@ -862,9 +872,29 @@ def run_migrations() -> None:
                     project_id TEXT REFERENCES projects(slug) ON DELETE SET NULL,
                     status_card_id TEXT REFERENCES status_cards(id) ON DELETE SET NULL,
                     due_date DATE,
+                    domain TEXT NOT NULL DEFAULT 'project' CONSTRAINT actions_domain_check CHECK (domain IN ('administratie', 'huis_gezin', 'project')),
+                    owner_id TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
+                """
+            )
+            cursor.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS domain TEXT")
+            cursor.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS owner_id TEXT")
+            cursor.execute("UPDATE actions SET domain = 'project' WHERE domain IS NULL")
+            cursor.execute("ALTER TABLE actions ALTER COLUMN domain SET DEFAULT 'project'")
+            cursor.execute("ALTER TABLE actions ALTER COLUMN domain SET NOT NULL")
+            cursor.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'actions_domain_check'
+                    ) THEN
+                        ALTER TABLE actions ADD CONSTRAINT actions_domain_check
+                        CHECK (domain IN ('administratie', 'huis_gezin', 'project'));
+                    END IF;
+                END $$
                 """
             )
             cursor.execute(
@@ -1750,12 +1780,23 @@ def update_status_card(
 
 
 @app.get("/api/actions")
-def list_actions(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+def list_actions(
+    domain: ActionDomain | None = Query(default=None),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> list[dict]:
     with connection.cursor() as cursor:
-        cursor.execute(
-            f"SELECT {ACTION_COLUMNS} FROM actions "
-            "ORDER BY CASE status WHEN 'Open' THEN 0 WHEN 'Bezig' THEN 1 WHEN 'Later' THEN 2 ELSE 3 END, "
+        query = f"SELECT {ACTION_COLUMNS} FROM actions"
+        parameters: tuple[str, ...] = ()
+        if domain is not None:
+            query += " WHERE domain = %s"
+            parameters = (domain.value,)
+        query += (
+            " ORDER BY CASE status WHEN 'Open' THEN 0 WHEN 'Bezig' THEN 1 WHEN 'Later' THEN 2 ELSE 3 END, "
             "due_date NULLS LAST, updated_at DESC"
+        )
+        cursor.execute(
+            query,
+            parameters,
         )
         return cursor.fetchall()
 
@@ -1777,8 +1818,8 @@ def create_action(action: ActionInput, connection: psycopg.Connection = Depends(
     with connection.cursor() as cursor:
         cursor.execute(
             f"""
-            INSERT INTO actions (id, title, type, status, priority, project_id, status_card_id, due_date)
-            VALUES (%(id)s, %(title)s, %(type)s, %(status)s, %(priority)s, %(project_id)s, %(status_card_id)s, %(due_date)s)
+            INSERT INTO actions (id, title, type, status, priority, project_id, status_card_id, due_date, domain, owner_id)
+            VALUES (%(id)s, %(title)s, %(type)s, %(status)s, %(priority)s, %(project_id)s, %(status_card_id)s, %(due_date)s, %(domain)s, %(owner_id)s)
             RETURNING {ACTION_COLUMNS}
             """,
             values,
