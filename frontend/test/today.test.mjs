@@ -37,4 +37,5 @@ test("Today uses semantic links and responsive keyboard-focusable controls", asy
   const page = await source("app/page.tsx");
   assert.match(page, /`\/actions\/\$\{item.id\}`/); assert.match(page, /`\/status-cards\/\$\{item.id\}`/); assert.match(page, /`\/projects\/\$\{item.id\}`/); assert.match(page, /return "\/homelab"/);
   assert.match(page, /focus-visible:ring-2/); assert.match(page, /lg:grid-cols/); assert.doesNotMatch(page, /onClick=/);
+  assert.match(page, /return "\/routines"/); assert.match(page, /return "\/gezondheid"/);
 });

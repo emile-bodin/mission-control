@@ -162,7 +162,11 @@ function SourceState({ name, source, compact = false }: { name: string; source: 
 function StateBadge({ status }: { status: TodayStatus }) { return <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs ${stateStyles[status]}`}>{stateLabels[status]}</span>; }
 
 function hrefForItem(item: TodayItem) {
+  if (item.kind === "action" && item.domain === "administratie") return "/administratie";
+  if (item.kind === "action" && item.domain === "huis_gezin") return "/huis-gezin";
   if (item.kind === "action") return `/actions/${item.id}`;
+  if (item.kind === "routine") return "/routines";
+  if (item.kind === "health_weight" || item.kind === "health_activity") return "/gezondheid";
   if (item.kind === "status_card") return `/status-cards/${item.id}`;
   if (item.kind === "project") return `/projects/${item.id}`;
   if (item.kind === "homelab_exception") return "/homelab";
