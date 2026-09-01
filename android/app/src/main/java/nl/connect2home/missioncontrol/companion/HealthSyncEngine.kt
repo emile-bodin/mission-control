@@ -2,6 +2,7 @@ package nl.connect2home.missioncontrol.companion
 
 import java.nio.charset.StandardCharsets
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 
 internal const val HEALTH_SYNC_BATCH_LIMIT = 100
 internal const val HEALTH_SYNC_PAYLOAD_LIMIT_BYTES = 1_048_576
@@ -30,6 +31,8 @@ internal data class ActivitySyncRecord(
     val sourceMetadata: Map<String, String>,
 ) : HealthSyncRecord {
     override fun toWireJson(): String {
+        val startedAt = startedAt.truncatedTo(ChronoUnit.SECONDS)
+        val endedAt = endedAt.truncatedTo(ChronoUnit.SECONDS)
         val duration = endedAt.epochSecond - startedAt.epochSecond
         val metadata = sourceMetadata.entries.sortedBy { it.key }
             .joinToString(",") { "${jsonString(it.key)}:${jsonString(it.value)}" }
@@ -64,7 +67,7 @@ internal interface HealthSyncStore {
 }
 
 internal sealed interface UploadResult {
-    data class Completed(val statuses: List<String>) : UploadResult
+    data class Completed(val statuses: List<String>, val diagnostics: List<String?> = emptyList()) : UploadResult
     data object AuthInvalid : UploadResult
     data class Unavailable(val message: String) : UploadResult
 }
@@ -118,7 +121,7 @@ internal class HealthSyncEngine(
                     store.writeLastError(response.message)
                     return HealthSyncOutcome.Unavailable(response.message)
                 }
-                is UploadResult.Completed -> applyResults(queue, confirmed, batch, response.statuses)
+                is UploadResult.Completed -> applyResults(queue, confirmed, batch, response.statuses, response.diagnostics)
             }
         }
         store.writeQueue(queue)
@@ -147,7 +150,10 @@ internal class HealthSyncEngine(
             confirmed.remove(key)
             val index = merged.indexOfFirst { it.record.source == record.source && it.record.externalRecordId == record.externalRecordId }
             if (index == -1) merged += QueuedHealthRecord(record)
-            else if (merged[index].record.toWireJson() != record.toWireJson()) merged[index] = QueuedHealthRecord(record)
+            else if (
+                merged[index].record.toWireJson() != record.toWireJson() ||
+                needsDurationMappingRetry(merged[index], record)
+            ) merged[index] = QueuedHealthRecord(record)
         }
         return merged
     }
@@ -159,6 +165,12 @@ internal class HealthSyncEngine(
             }
         }
     }
+
+    private fun needsDurationMappingRetry(existing: QueuedHealthRecord, record: HealthSyncRecord): Boolean =
+        existing.state == QueueState.INVALID &&
+            existing.error == "Backend wees record af." &&
+            record is ActivitySyncRecord &&
+            (record.startedAt.nano != 0 || record.endedAt.nano != 0)
 
     private fun batches(records: List<HealthSyncRecord>): List<List<HealthSyncRecord>> {
         val result = mutableListOf<List<HealthSyncRecord>>()
@@ -180,6 +192,7 @@ internal class HealthSyncEngine(
         confirmed: MutableMap<String, String>,
         batch: List<HealthSyncRecord>,
         statuses: List<String>,
+        diagnostics: List<String?>,
     ) {
         batch.forEachIndexed { index, record ->
             when (statuses.getOrNull(index)) {
@@ -189,7 +202,10 @@ internal class HealthSyncEngine(
                 }
                 "invalid" -> {
                     val queueIndex = queue.indexOfFirst { it.record.source == record.source && it.record.externalRecordId == record.externalRecordId }
-                    if (queueIndex >= 0) queue[queueIndex] = queue[queueIndex].copy(state = QueueState.INVALID, error = "Backend wees record af.")
+                    if (queueIndex >= 0) queue[queueIndex] = queue[queueIndex].copy(
+                        state = QueueState.INVALID,
+                        error = diagnostics.getOrNull(index) ?: "Backend wees record af.",
+                    )
                 }
             }
         }

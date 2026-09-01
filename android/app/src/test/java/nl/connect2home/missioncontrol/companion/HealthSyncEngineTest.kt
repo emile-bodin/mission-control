@@ -35,6 +35,20 @@ class HealthSyncEngineTest {
     }
 
     @Test
+    fun `fractional activity timestamps map to an exact whole second interval`() {
+        val record = activity("fractional").copy(
+            startedAt = now.minusSeconds(1800).plusMillis(100),
+            endedAt = now.plusMillis(200),
+        )
+
+        val payload = record.toWireJson()
+
+        assertTrue(payload.contains("\"duration_seconds\":1800"))
+        assertTrue(payload.contains("\"started_at\":\"2026-08-31T09:30:00Z\""))
+        assertTrue(payload.contains("\"ended_at\":\"2026-08-31T10:00:00Z\""))
+    }
+
+    @Test
     fun `duplicate Health Connect record is not uploaded again`() {
         val store = FakeStore()
         val transport = FakeTransport()
@@ -81,11 +95,30 @@ class HealthSyncEngineTest {
         assertTrue(unchangedStore.readQueue().isEmpty())
 
         val invalidStore = FakeStore()
-        val invalidTransport = FakeTransport(responses = mutableListOf(UploadResult.Completed(listOf("invalid"))))
+        val invalidTransport = FakeTransport(responses = mutableListOf(
+            UploadResult.Completed(listOf("invalid"), listOf("validation_error:value_error:record")),
+        ))
         engine(FakeGateway(records = listOf(weight("invalid"))), invalidStore, invalidTransport).sync("token")
         assertEquals(QueueState.INVALID, invalidStore.readQueue().single().state)
+        assertEquals("validation_error:value_error:record", invalidStore.readQueue().single().error)
         engine(FakeGateway(records = listOf(weight("invalid"))), invalidStore, invalidTransport).sync("token")
         assertEquals(1, invalidTransport.calls.size)
+    }
+
+    @Test
+    fun `old fractional duration invalid activity is retried once`() {
+        val record = activity("fractional-invalid").copy(
+            startedAt = now.minusSeconds(1800).plusMillis(100),
+            endedAt = now.plusMillis(200),
+        )
+        val store = FakeStore()
+        store.writeQueue(listOf(QueuedHealthRecord(record, QueueState.INVALID, "Backend wees record af.")))
+        val transport = FakeTransport()
+
+        engine(FakeGateway(records = listOf(record)), store, transport).sync("token")
+
+        assertEquals(1, transport.calls.size)
+        assertTrue(store.readQueue().isEmpty())
     }
 
     @Test

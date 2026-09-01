@@ -80,9 +80,9 @@ internal class MissionControlClient {
         when (connection.responseCode) {
             200 -> {
                 val response = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
-                val statuses = response.getJSONArray("results").statuses()
+                val results = response.getJSONArray("results")
                 connection.disconnect()
-                UploadResult.Completed(statuses)
+                UploadResult.Completed(results.statuses(), results.validationDiagnostics())
             }
             401 -> {
                 connection.disconnect()
@@ -115,6 +115,19 @@ internal class MissionControlClient {
 
 private fun JSONArray.statuses(): List<String> = buildList {
     for (index in 0 until length()) add(getJSONObject(index).getString("status"))
+}
+
+private fun JSONArray.validationDiagnostics(): List<String?> = buildList {
+    for (index in 0 until length()) {
+        val error = getJSONObject(index).optJSONObject("error")
+        val detail = error?.optJSONArray("details")?.optJSONObject(0)
+        val code = error?.optString("code").orEmpty()
+        val type = detail?.optString("type").orEmpty()
+        val location = detail?.optJSONArray("loc")?.let { values ->
+            (0 until values.length()).joinToString(".") { values.getString(it) }
+        }.orEmpty().ifBlank { "record" }
+        add(if (code.isBlank()) null else listOf(code, type, location).filter { it.isNotBlank() }.joinToString(":"))
+    }
 }
 
 internal sealed interface PairingResult {
