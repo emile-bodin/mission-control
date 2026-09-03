@@ -11,11 +11,11 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="nl">
       <body>
-        <div className="min-h-screen bg-[#070c15] text-slate-100">
-          <aside className="border-b border-slate-800/90 bg-[#09111f]/95 px-4 py-4 shadow-2xl shadow-black/20 md:fixed md:inset-y-0 md:left-0 md:flex md:w-64 md:flex-col md:border-b-0 md:border-r md:px-5 md:py-8">
+        <div className="cockpit-root min-h-screen text-slate-100">
+          <aside className="cockpit-sidebar border-b border-slate-800/90 px-4 py-4 md:fixed md:inset-y-0 md:left-0 md:flex md:w-64 md:flex-col md:border-b-0 md:border-r md:px-5 md:py-8">
             <div className="flex items-center gap-3 px-2">
-              <div className="grid h-10 w-10 place-items-center rounded-xl border border-indigo-300/40 bg-indigo-400/10 text-xl text-indigo-200">◌</div>
-              <div><p className="text-sm font-bold tracking-[0.14em] text-white">MISSION</p><p className="text-sm font-bold tracking-[0.14em] text-indigo-400">CONTROL</p></div>
+              <div className="grid h-10 w-10 place-items-center rounded-xl border border-blue-300/35 bg-blue-400/10 text-xl text-blue-100">◌</div>
+              <div><p className="text-sm font-bold tracking-[0.14em] text-white">MISSION</p><p className="text-sm font-bold tracking-[0.14em] text-blue-400">CONTROL</p></div>
             </div>
             <Navigation />
             <div className="mt-8 hidden rounded-2xl border border-slate-800 bg-slate-900/65 p-4 md:block">
