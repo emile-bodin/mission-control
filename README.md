@@ -55,17 +55,18 @@ Kopieer `.env.example` naar `.env` en pas deze waarden aan:
 - `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` — lokale PostgreSQL-configuratie.
 - `DEVICE_TOKEN_PEPPER` — uniek hoog-entropie geheim voor HMAC-SHA256 van pairingcodes, device-tokens en rate-limit-IP's.
 - `DEVICE_ADMIN_TOKEN` — uniek hoog-entropie geheim voor devicebeheer-API's; nooit in browsercode, URL's of logs zetten.
+- `CODEX_RUNTIME_TOKEN` — uniek hoog-entropie geheim tussen backend en interne Codex-gateway; nooit in browsercode, URL's of logs zetten.
 
 `.env` staat in `.gitignore`. Commit geen echte secrets. PostgreSQL en FastAPI zijn alleen bereikbaar binnen Compose-netwerk.
 
 ## Geïsoleerde Codex-service (HYD-178)
 
-Codex draait optioneel in een apart Compose-profiel. De service heeft geen host- of repository-mount, geen toegang tot de applicatie- of databasenetwerken en een read-only rootfilesystem. Alleen Docker-volume `codex_auth` is schrijfbaar voor de eenmalige Codex-login. De statuspoort bindt standaard uitsluitend op localhost.
+Codex draait optioneel in een apart Compose-profiel. De service heeft geen host- of repository-mount en een read-only rootfilesystem. Alleen Docker-volume `codex_auth` is schrijfbaar voor de eenmalige Codex-login. De statuspoort bindt standaard uitsluitend op localhost.
 
 Start de service en voer eenmalig de interactieve login uit:
 
 ```sh
-docker compose --profile codex up -d --build codex
+docker compose --profile codex up -d --build codex codex-gateway
 docker compose --profile codex run --rm --no-deps codex codex login --device-auth
 ```
 
@@ -80,6 +81,20 @@ docker compose --profile codex run --rm --no-deps codex \
 `GET /health` geeft alleen HTTP 200 terug wanneer `codex login status` slaagt. Bij ontbrekende of ongeldige auth faalt de endpoint gesloten met HTTP 503. `GET /status` geeft ook dan alleen generieke status terug; tokens, accountgegevens en CLI-uitvoer worden niet getoond.
 
 De aparte `codex_egress`-netwerkbrug voorkomt toegang tot `frontend`, `backend` en `db`. Beperk externe egress aanvullend op hostniveau of via een bedrijfsproxy tot benodigde OpenAI-endpoints; Docker Compose kan geen betrouwbare bestemming-allowlist afdwingen.
+
+## Dagbriefing (HYD-179)
+
+De backend maakt dagelijks vanaf 07:00 Europe/Amsterdam en via `POST /api/briefings/refresh` een briefing-run. Eén run kan tegelijk actief zijn. Ongeldige output, ontbrekende runtime-auth en time-outs worden als mislukte run bewaard en niet gepubliceerd.
+
+Voor live briefings is een aparte gedeelde secret nodig:
+
+```sh
+openssl rand -hex 32
+# Zet uitkomst alleen in .env als CODEX_RUNTIME_TOKEN=...
+docker compose --profile codex up -d --build backend codex codex-gateway
+```
+
+Backend praat alleen met `codex-gateway` op het applicatienetwerk. De gateway valideert die token en is de enige brug naar Codex op intern netwerk `codex_runtime`; Codex zelf blijft buiten backend- en databasenetwerk. Open `/briefings` voor laatste briefing en handmatige refresh.
 
 ## Publieke reverse proxy (HYD-181)
 

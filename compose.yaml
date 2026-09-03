@@ -21,6 +21,8 @@ services:
       PULSE_API_TOKEN: ${PULSE_API_TOKEN:-}
       DEVICE_TOKEN_PEPPER: ${DEVICE_TOKEN_PEPPER:?Set DEVICE_TOKEN_PEPPER in .env}
       DEVICE_ADMIN_TOKEN: ${DEVICE_ADMIN_TOKEN:?Set DEVICE_ADMIN_TOKEN in .env}
+      CODEX_RUNTIME_URL: http://codex-gateway:8090
+      CODEX_RUNTIME_TOKEN: ${CODEX_RUNTIME_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy
@@ -49,12 +51,14 @@ services:
       CODEX_HOME: /home/codex/.codex
       HOME: /home/codex
       CODEX_AUTH_TIMEOUT_MS: ${CODEX_AUTH_TIMEOUT_MS:-5000}
+      CODEX_RUNTIME_TOKEN: ${CODEX_RUNTIME_TOKEN:-}
     ports:
       - "${CODEX_STATUS_BIND:-127.0.0.1}:${CODEX_STATUS_PORT:-8081}:8080"
     volumes:
       - codex_auth:/home/codex/.codex
     networks:
       - codex_egress
+      - codex_runtime
     read_only: true
     tmpfs:
       - /tmp
@@ -75,9 +79,38 @@ services:
       retries: 2
       start_period: 5s
 
+  codex-gateway:
+    profiles: ["codex"]
+    build:
+      context: ./codex
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-0.149.1}
+    environment:
+      CODEX_RUNTIME_TOKEN: ${CODEX_RUNTIME_TOKEN:-}
+      CODEX_RUNNER_URL: http://codex:8080/run
+    entrypoint: ["node", "/app/gateway-server.mjs"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "10001:10001"
+    init: true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+    restart: unless-stopped
+    networks:
+      - default
+      - codex_runtime
+
 volumes:
   postgres_data:
   codex_auth:
 
 networks:
   codex_egress:
+  codex_runtime:
+    internal: true
