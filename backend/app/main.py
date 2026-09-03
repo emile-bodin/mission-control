@@ -21,7 +21,7 @@ from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from app.briefings import BriefingRuntimeError, BriefingRuntimeTimeout, CodexRuntime, schedule_due
+from app.briefings import BriefingProposal, BriefingRuntimeError, BriefingRuntimeTimeout, CodexRuntime, schedule_due
 
 
 class ProjectStatus(str, Enum):
@@ -285,6 +285,12 @@ class RoutinePatch(BaseModel):
     weekdays: list[int] = Field(default=None)
     reminder_time: time = Field(default=None)
     owner_id: str | None = None
+
+
+class ProposalAcceptInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: bool
 
 
 class RoutineOccurrenceInput(BaseModel):
@@ -1154,6 +1160,44 @@ def run_migrations() -> None:
                 CREATE UNIQUE INDEX IF NOT EXISTS briefing_runs_scheduled_day_idx
                 ON briefing_runs (scheduled_for)
                 WHERE trigger = 'scheduled' AND status IN ('Running', 'Completed')
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS briefing_proposals (
+                    id TEXT PRIMARY KEY,
+                    briefing_id TEXT NOT NULL REFERENCES briefing_runs(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    record_type TEXT NOT NULL CHECK (record_type IN ('action', 'routine')),
+                    record_id TEXT NOT NULL,
+                    expected_updated_at TIMESTAMPTZ NOT NULL,
+                    changes JSONB NOT NULL,
+                    source_context JSONB NOT NULL,
+                    expected_impact TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected', 'failed')) DEFAULT 'pending',
+                    result JSONB,
+                    decided_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS briefing_proposal_audits (
+                    id TEXT PRIMARY KEY,
+                    briefing_id TEXT NOT NULL REFERENCES briefing_runs(id) ON DELETE CASCADE,
+                    proposal_id TEXT NOT NULL REFERENCES briefing_proposals(id) ON DELETE CASCADE,
+                    decision TEXT NOT NULL CHECK (decision IN ('accepted', 'rejected', 'failed')),
+                    result JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS briefing_proposals_briefing_idx
+                ON briefing_proposals (briefing_id, created_at)
                 """
             )
 
@@ -2108,13 +2152,17 @@ def update_asset(asset_id: str, asset: AssetPatch, connection: psycopg.Connectio
 BRIEFING_RUN_COLUMNS = """
     id, trigger, status, scheduled_for, briefing, validation_error, started_at, finished_at, created_at
 """
+BRIEFING_PROPOSAL_COLUMNS = """
+    id, briefing_id, title, rationale, record_type, record_id, expected_updated_at, changes,
+    source_context, expected_impact, status, result, decided_at, created_at
+"""
 
 
 def briefing_context(connection: psycopg.Connection, now: datetime) -> dict:
     local_now = now.astimezone(PRODUCT_TIMEZONE)
     with connection.cursor() as cursor:
         cursor.execute(
-            f"SELECT title, status, priority, due_date, domain FROM actions "
+            f"SELECT id, title, status, priority, due_date, domain, updated_at FROM actions "
             "WHERE status != 'Klaar' ORDER BY due_date NULLS LAST, updated_at DESC LIMIT 20"
         )
         actions = cursor.fetchall()
@@ -2144,12 +2192,115 @@ def briefing_context(connection: psycopg.Connection, now: datetime) -> dict:
         "generated_at": now,
         "agenda": {"status": schedule["status"], "events": schedule["events"][:8]},
         "actions": actions,
-        "routines_due": [{"title": routine["title"], "reminder_time": routine["reminder_time"]} for routine in routines],
+        "routines_due": [
+            {"id": routine["id"], "title": routine["title"], "reminder_time": routine["reminder_time"], "updated_at": routine["updated_at"]}
+            for routine in routines
+        ],
         "projects": projects,
         "status_cards": cards,
         "pulse": assets,
         "health": {"weights": weights, "activities": activities},
     }
+
+
+def persist_briefing_proposals(
+    connection: psycopg.Connection, briefing_id: str, proposals: list[BriefingProposal]
+) -> None:
+    if not proposals:
+        return
+    values = []
+    for proposal in proposals:
+        item = proposal.model_dump(mode="json")
+        values.append(
+            {
+                "id": str(uuid4()),
+                "briefing_id": briefing_id,
+                **item,
+                "changes": json.dumps(item["changes"]),
+                "source_context": json.dumps(item["source_context"]),
+            }
+        )
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO briefing_proposals (
+                id, briefing_id, title, rationale, record_type, record_id, expected_updated_at,
+                changes, source_context, expected_impact
+            ) VALUES (
+                %(id)s, %(briefing_id)s, %(title)s, %(rationale)s, %(record_type)s, %(record_id)s,
+                %(expected_updated_at)s, %(changes)s::jsonb, %(source_context)s::jsonb, %(expected_impact)s
+            )
+            """,
+            values,
+        )
+
+
+def record_proposal_audit(
+    connection: psycopg.Connection, proposal: dict, decision: str, result: dict
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO briefing_proposal_audits (id, briefing_id, proposal_id, decision, result)
+            VALUES (%s, %s, %s, %s, %s::jsonb)
+            """,
+            (str(uuid4()), proposal["briefing_id"], proposal["id"], decision, json.dumps(result, default=str)),
+        )
+
+
+def decide_briefing_proposal(connection: psycopg.Connection, proposal_id: str, decision: str) -> dict | None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {BRIEFING_PROPOSAL_COLUMNS} FROM briefing_proposals WHERE id = %s FOR UPDATE",
+            (proposal_id,),
+        )
+        proposal = cursor.fetchone()
+    if proposal is None:
+        return None
+    if proposal["status"] != "pending":
+        return proposal
+    if decision == "rejected":
+        result = {"message": "Proposal rejected; no domain record changed."}
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE briefing_proposals SET status = 'rejected', result = %s::jsonb, decided_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (json.dumps(result), proposal_id),
+            )
+        proposal["status"], proposal["result"] = "rejected", result
+        record_proposal_audit(connection, proposal, "rejected", result)
+        return proposal
+
+    try:
+        columns = ACTION_COLUMNS if proposal["record_type"] == "action" else ROUTINE_COLUMNS
+        table = "actions" if proposal["record_type"] == "action" else "routines"
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT {columns} FROM {table} WHERE id = %s FOR UPDATE", (proposal["record_id"],))
+            target = cursor.fetchone()
+        if target is None:
+            result = {"message": "Proposal target no longer exists."}
+            proposal["status"], proposal["result"] = "failed", result
+        elif target["updated_at"] != proposal["expected_updated_at"]:
+            result = {"message": "Proposal target changed after the briefing."}
+            proposal["status"], proposal["result"] = "failed", result
+        else:
+            updated = (
+                update_action(proposal["record_id"], ActionPatch.model_validate(proposal["changes"]), connection)
+                if proposal["record_type"] == "action"
+                else update_routine(proposal["record_id"], RoutinePatch.model_validate(proposal["changes"]), connection)
+            )
+            result = {"record_id": updated["id"], "updated_at": updated["updated_at"]}
+            proposal["status"], proposal["result"] = "accepted", result
+    except (ValidationError, HTTPException) as error:
+        result = {"message": "Proposal target or changes are no longer valid.", "detail": str(error)}
+        proposal["status"], proposal["result"] = "failed", result
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE briefing_proposals SET status = %s, result = %s::jsonb, decided_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (proposal["status"], json.dumps(proposal["result"], default=str), proposal_id),
+        )
+    record_proposal_audit(connection, proposal, proposal["status"], proposal["result"])
+    return proposal
 
 
 def create_briefing_run(
@@ -2201,8 +2352,9 @@ def execute_briefing_run(run_id: str) -> None:
                     SET status = 'Completed', briefing = %s::jsonb, finished_at = CURRENT_TIMESTAMP
                     WHERE id = %s AND status = 'Running'
                     """,
-                    (json.dumps(output.model_dump()), run_id),
+                    (json.dumps(output.model_dump(mode="json")), run_id),
                 )
+            persist_briefing_proposals(connection, run_id, output.proposals)
 
 
 def schedule_briefing_if_due() -> None:
@@ -2238,6 +2390,39 @@ def list_briefings(connection: psycopg.Connection = Depends(get_connection)) -> 
     with connection.cursor() as cursor:
         cursor.execute(f"SELECT {BRIEFING_RUN_COLUMNS} FROM briefing_runs ORDER BY created_at DESC LIMIT 20")
         return cursor.fetchall()
+
+
+@app.get("/api/briefing-proposals")
+def list_briefing_proposals(
+    briefing_id: str | None = Query(default=None), connection: psycopg.Connection = Depends(get_connection)
+) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {BRIEFING_PROPOSAL_COLUMNS} FROM briefing_proposals "
+            "WHERE (%s IS NULL OR briefing_id = %s) ORDER BY created_at DESC LIMIT 50",
+            (briefing_id, briefing_id),
+        )
+        return cursor.fetchall()
+
+
+@app.post("/api/briefing-proposals/{proposal_id}/accept")
+def accept_briefing_proposal(
+    proposal_id: str, confirmation: ProposalAcceptInput, connection: psycopg.Connection = Depends(get_connection)
+) -> dict:
+    if not confirmation.confirmed:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Explicit confirmation is required")
+    proposal = decide_briefing_proposal(connection, proposal_id, "accepted")
+    if proposal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Briefing proposal not found")
+    return proposal
+
+
+@app.post("/api/briefing-proposals/{proposal_id}/reject")
+def reject_briefing_proposal(proposal_id: str, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    proposal = decide_briefing_proposal(connection, proposal_id, "rejected")
+    if proposal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Briefing proposal not found")
+    return proposal
 
 
 @app.post("/api/briefings/refresh", status_code=status.HTTP_202_ACCEPTED)

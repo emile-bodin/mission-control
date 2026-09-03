@@ -2,7 +2,7 @@ import unittest
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from app.briefings import BriefingOutput, BriefingRuntimeError, BriefingRuntimeTimeout, CodexRuntime, schedule_due
+from app.briefings import BriefingOutput, BriefingProposal, BriefingRuntimeError, BriefingRuntimeTimeout, CodexRuntime, schedule_due
 
 
 class BriefingTests(unittest.TestCase):
@@ -17,6 +17,23 @@ class BriefingTests(unittest.TestCase):
     def test_schema_rejects_unexpected_agent_output(self):
         with self.assertRaises(Exception):
             BriefingOutput.model_validate({"summary": "ok", "facts": [], "proposals": [], "unknowns": [], "extra": "no"})
+
+    def test_proposal_requires_one_versioned_target(self):
+        proposal = BriefingProposal.model_validate(
+            {
+                "title": "Markeer actie klaar",
+                "rationale": "Actie staat als afgerond in broncontext.",
+                "record_type": "action",
+                "record_id": "action-1",
+                "expected_updated_at": "2026-09-03T10:00:00Z",
+                "changes": {"status": "Klaar"},
+                "source_context": ["Actie action-1 heeft status Open."],
+                "expected_impact": "Actie verdwijnt uit open overzicht.",
+            }
+        )
+        self.assertEqual(proposal.record_id, "action-1")
+        with self.assertRaises(Exception):
+            BriefingProposal.model_validate({"title": "onvolledig", "rationale": "onvolledig"})
 
     def test_runtime_requires_configuration(self):
         with self.assertRaises(BriefingRuntimeError):
