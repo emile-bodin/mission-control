@@ -1,6 +1,7 @@
 import json
 import socket
 from datetime import datetime, time
+from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -17,6 +18,12 @@ class BriefingProposal(BaseModel):
 
     title: str = Field(min_length=1, max_length=280)
     rationale: str = Field(min_length=1, max_length=1000)
+    record_type: Literal["action", "routine"]
+    record_id: str = Field(min_length=1, max_length=128)
+    expected_updated_at: datetime
+    changes: dict[str, Any] = Field(min_length=1, max_length=10)
+    source_context: list[str] = Field(min_length=1, max_length=5)
+    expected_impact: str = Field(min_length=1, max_length=1000)
 
 
 class BriefingOutput(BaseModel):
@@ -48,9 +55,10 @@ def briefing_prompt(context: dict) -> str:
         "Maak een persoonlijke dagbriefing uitsluitend op basis van deze JSON-context. "
         "Presenteer onbekende waarden expliciet als Unknown; verzin geen feiten. "
         "Doe alleen voorstellen, voer niets uit en wijzig geen externe systemen. "
-        "Gebruik maximaal 12 facts, 8 proposals en 12 unknowns. "
+        "Gebruik maximaal 12 facts, 8 proposals en 12 unknowns. Ieder voorstel wijzigt exact één bestaand "
+        "action- of routine-record uit de context, met diens id en updated_at als expected_updated_at. "
         "Antwoord uitsluitend met valide JSON volgens dit schema: "
-        '{"summary":"tekst","facts":["feit"],"proposals":[{"title":"voorstel","rationale":"waarom"}],"unknowns":["onbekend veld"]}.\n\n'
+        '{"summary":"tekst","facts":["feit"],"proposals":[{"title":"voorstel","rationale":"waarom","record_type":"action","record_id":"id","expected_updated_at":"ISO-8601","changes":{"status":"Klaar"},"source_context":["feit uit context"],"expected_impact":"verwacht effect"}],"unknowns":["onbekend veld"]}.\n\n'
         + json.dumps(context, default=str, ensure_ascii=False)
     )
 
