@@ -1,7 +1,8 @@
 import base64
 import binascii
+import asyncio
 from collections.abc import Generator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
 import hmac
@@ -15,10 +16,12 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from app.briefings import BriefingRuntimeError, BriefingRuntimeTimeout, CodexRuntime, schedule_due
 
 
 class ProjectStatus(str, Enum):
@@ -1124,12 +1127,54 @@ def run_migrations() -> None:
                 WHERE external_record_id IS NOT NULL
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS briefing_runs (
+                    id TEXT PRIMARY KEY,
+                    trigger TEXT NOT NULL CHECK (trigger IN ('manual', 'scheduled')),
+                    status TEXT NOT NULL CHECK (status IN ('Running', 'Completed', 'Failed', 'Timed out')),
+                    scheduled_for DATE,
+                    briefing JSONB,
+                    validation_error TEXT,
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS briefing_runs_one_active_idx
+                ON briefing_runs ((true))
+                WHERE status = 'Running'
+                """
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS briefing_runs_scheduled_day_idx
+                ON briefing_runs (scheduled_for)
+                WHERE trigger = 'scheduled' AND status IN ('Running', 'Completed')
+                """
+            )
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     run_migrations()
-    yield
+    stop = asyncio.Event()
+    task = (
+        asyncio.create_task(briefing_scheduler(stop))
+        if os.environ.get("BRIEFING_SCHEDULER_ENABLED", "true").lower() == "true"
+        else None
+    )
+    try:
+        yield
+    finally:
+        stop.set()
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 app = FastAPI(title="Bodin Control Center API", lifespan=lifespan)
@@ -2058,3 +2103,150 @@ def update_asset(asset_id: str, asset: AssetPatch, connection: psycopg.Connectio
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
     return updated
+
+
+BRIEFING_RUN_COLUMNS = """
+    id, trigger, status, scheduled_for, briefing, validation_error, started_at, finished_at, created_at
+"""
+
+
+def briefing_context(connection: psycopg.Connection, now: datetime) -> dict:
+    local_now = now.astimezone(PRODUCT_TIMEZONE)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT title, status, priority, due_date, domain FROM actions "
+            "WHERE status != 'Klaar' ORDER BY due_date NULLS LAST, updated_at DESC LIMIT 20"
+        )
+        actions = cursor.fetchall()
+        cursor.execute("SELECT slug, display_name, status, personal_status FROM projects ORDER BY display_name")
+        projects = cursor.fetchall()
+        cursor.execute(
+            "SELECT title, status, facts, next_safe_step FROM status_cards "
+            "WHERE resolved_at IS NULL ORDER BY updated_at DESC LIMIT 12"
+        )
+        cards = cursor.fetchall()
+        cursor.execute(f"SELECT name, status, type FROM assets ORDER BY name")
+        assets = cursor.fetchall()
+        cursor.execute(
+            "SELECT measured_at, normalized_kg, source FROM health_weights "
+            "ORDER BY measured_at DESC LIMIT 7"
+        )
+        weights = cursor.fetchall()
+        cursor.execute(
+            "SELECT activity_type, started_at, duration_seconds, source FROM health_activities "
+            "ORDER BY started_at DESC LIMIT 10"
+        )
+        activities = cursor.fetchall()
+
+    schedule = calendar_schedule()
+    routines = due_routines_for_date(connection, local_now.date())
+    return {
+        "generated_at": now,
+        "agenda": {"status": schedule["status"], "events": schedule["events"][:8]},
+        "actions": actions,
+        "routines_due": [{"title": routine["title"], "reminder_time": routine["reminder_time"]} for routine in routines],
+        "projects": projects,
+        "status_cards": cards,
+        "pulse": assets,
+        "health": {"weights": weights, "activities": activities},
+    }
+
+
+def create_briefing_run(
+    connection: psycopg.Connection,
+    trigger: str,
+    scheduled_for: date | None = None,
+) -> dict | None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO briefing_runs (id, trigger, status, scheduled_for)
+            VALUES (%s, %s, 'Running', %s)
+            ON CONFLICT DO NOTHING
+            RETURNING {BRIEFING_RUN_COLUMNS}
+            """,
+            (str(uuid4()), trigger, scheduled_for),
+        )
+        return cursor.fetchone()
+
+
+def execute_briefing_run(run_id: str) -> None:
+    with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM briefing_runs WHERE id = %s AND status = 'Running'", (run_id,))
+            if cursor.fetchone() is None:
+                return
+        try:
+            context = briefing_context(connection, datetime.now(UTC))
+            output = CodexRuntime(
+                os.environ.get("CODEX_RUNTIME_URL", ""),
+                os.environ.get("CODEX_RUNTIME_TOKEN", ""),
+            ).run(context)
+        except BriefingRuntimeError as error:
+            briefing_status = "Timed out" if isinstance(error, BriefingRuntimeTimeout) else "Failed"
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE briefing_runs
+                    SET status = %s, validation_error = %s, finished_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status = 'Running'
+                    """,
+                    (briefing_status, str(error), run_id),
+                )
+        else:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE briefing_runs
+                    SET status = 'Completed', briefing = %s::jsonb, finished_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status = 'Running'
+                    """,
+                    (json.dumps(output.model_dump()), run_id),
+                )
+
+
+def schedule_briefing_if_due() -> None:
+    now = datetime.now(UTC)
+    with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT finished_at FROM briefing_runs WHERE status = 'Completed' "
+                "ORDER BY finished_at DESC LIMIT 1"
+            )
+            previous = cursor.fetchone()
+        last_completed_at = previous["finished_at"] if previous else None
+        if not schedule_due(now, last_completed_at):
+            return
+        run = create_briefing_run(connection, "scheduled", now.astimezone(PRODUCT_TIMEZONE).date())
+        if run is None:
+            return
+        run_id = run["id"]
+    execute_briefing_run(run_id)
+
+
+async def briefing_scheduler(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        await asyncio.to_thread(schedule_briefing_if_due)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=60)
+        except TimeoutError:
+            pass
+
+
+@app.get("/api/briefings")
+def list_briefings(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {BRIEFING_RUN_COLUMNS} FROM briefing_runs ORDER BY created_at DESC LIMIT 20")
+        return cursor.fetchall()
+
+
+@app.post("/api/briefings/refresh", status_code=status.HTTP_202_ACCEPTED)
+def refresh_briefing(
+    background_tasks: BackgroundTasks,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    run = create_briefing_run(connection, "manual")
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A briefing run is already active.")
+    background_tasks.add_task(execute_briefing_run, run["id"])
+    return run

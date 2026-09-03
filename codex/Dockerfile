@@ -9,6 +9,7 @@ RUN addgroup -S -g 10001 codex \
 WORKDIR /app
 
 COPY status-server.mjs /app/status-server.mjs
+COPY gateway-server.mjs /app/gateway-server.mjs
 COPY entrypoint.sh /usr/local/bin/codex-entrypoint
 COPY runtime-config.toml /opt/codex/runtime-config.toml
 
