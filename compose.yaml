@@ -39,5 +39,45 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  codex:
+    profiles: ["codex"]
+    build:
+      context: ./codex
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-0.149.1}
+    environment:
+      CODEX_HOME: /home/codex/.codex
+      HOME: /home/codex
+      CODEX_AUTH_TIMEOUT_MS: ${CODEX_AUTH_TIMEOUT_MS:-5000}
+    ports:
+      - "${CODEX_STATUS_BIND:-127.0.0.1}:${CODEX_STATUS_PORT:-8081}:8080"
+    volumes:
+      - codex_auth:/home/codex/.codex
+    networks:
+      - codex_egress
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    user: "10001:10001"
+    init: true
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "/app/status-server.mjs", "--check"]
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 5s
+
 volumes:
   postgres_data:
+  codex_auth:
+
+networks:
+  codex_egress:
