@@ -58,6 +58,29 @@ Kopieer `.env.example` naar `.env` en pas deze waarden aan:
 
 `.env` staat in `.gitignore`. Commit geen echte secrets. PostgreSQL en FastAPI zijn alleen bereikbaar binnen Compose-netwerk.
 
+## Geïsoleerde Codex-service (HYD-178)
+
+Codex draait optioneel in een apart Compose-profiel. De service heeft geen host- of repository-mount, geen toegang tot de applicatie- of databasenetwerken en een read-only rootfilesystem. Alleen Docker-volume `codex_auth` is schrijfbaar voor de eenmalige Codex-login. De statuspoort bindt standaard uitsluitend op localhost.
+
+Start de service en voer eenmalig de interactieve login uit:
+
+```sh
+docker compose --profile codex up -d --build codex
+docker compose --profile codex run --rm --no-deps codex codex login --device-auth
+```
+
+Controleer auth en non-interactive uitvoering:
+
+```sh
+curl --fail http://127.0.0.1:${CODEX_STATUS_PORT:-8081}/health
+docker compose --profile codex run --rm --no-deps codex \
+  codex exec --skip-git-repo-check "Reply with exactly: codex-ready"
+```
+
+`GET /health` geeft alleen HTTP 200 terug wanneer `codex login status` slaagt. Bij ontbrekende of ongeldige auth faalt de endpoint gesloten met HTTP 503. `GET /status` geeft ook dan alleen generieke status terug; tokens, accountgegevens en CLI-uitvoer worden niet getoond.
+
+De aparte `codex_egress`-netwerkbrug voorkomt toegang tot `frontend`, `backend` en `db`. Beperk externe egress aanvullend op hostniveau of via een bedrijfsproxy tot benodigde OpenAI-endpoints; Docker Compose kan geen betrouwbare bestemming-allowlist afdwingen.
+
 ## Publieke reverse proxy (HYD-181)
 
 Publieke URL: `https://hera.connect2home.nl`. TLS en Let's Encrypt blijven volledig eigendom van bestaande reverse proxy. Mission Control start geen tweede proxy en beheert geen certificaten.
