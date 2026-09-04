@@ -1,8 +1,9 @@
 import base64
 import binascii
+import asyncio
 from collections.abc import Generator
-from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime, timedelta
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
 import hmac
 import json
@@ -15,10 +16,12 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+
+from app.briefings import BriefingProposal, BriefingRuntimeError, BriefingRuntimeTimeout, CodexRuntime, schedule_due
 
 
 class ProjectStatus(str, Enum):
@@ -45,6 +48,18 @@ class ActionStatus(str, Enum):
     IN_PROGRESS = "Bezig"
     DONE = "Klaar"
     LATER = "Later"
+
+
+class ActionDomain(str, Enum):
+    ADMINISTRATION = "administratie"
+    HOUSEHOLD = "huis_gezin"
+    PROJECT = "project"
+
+
+class RoutineFrequency(str, Enum):
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    SELECTED_WEEKDAYS = "selected_weekdays"
 
 
 class AssetStatus(str, Enum):
@@ -97,6 +112,44 @@ def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str
             fields[key.split(";", 1)[0]] = value.replace("\\,", ",").replace("\\n", " ")
 
     return sorted(events, key=lambda event: event["starts_at"])
+
+
+def product_local_date(now: datetime | None = None) -> date:
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("Routine scheduling requires an aware datetime")
+    return current.astimezone(PRODUCT_TIMEZONE).date()
+
+
+def routine_is_scheduled_on(routine: dict, occurrence_date: date) -> bool:
+    frequency = RoutineFrequency(routine["frequency"])
+    if frequency is RoutineFrequency.DAILY:
+        return True
+    weekdays = routine["weekdays"]
+    if isinstance(weekdays, str):
+        weekdays = json.loads(weekdays)
+    return occurrence_date.isoweekday() in weekdays
+
+
+def due_routines_for_date(connection: psycopg.Connection, occurrence_date: date) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT {ROUTINE_COLUMNS}
+            FROM routines
+            WHERE active
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM routine_completions
+                  WHERE routine_completions.routine_id = routines.id
+                    AND routine_completions.occurrence_date = %s
+              )
+            ORDER BY reminder_time, title, id
+            """,
+            (occurrence_date,),
+        )
+        routines = cursor.fetchall()
+    return [routine for routine in routines if routine_is_scheduled_on(routine, occurrence_date)]
 
 
 class ProjectInput(BaseModel):
@@ -175,6 +228,8 @@ class ActionInput(BaseModel):
     project_id: str | None = None
     status_card_id: str | None = None
     due_date: date | None = None
+    domain: ActionDomain = ActionDomain.PROJECT
+    owner_id: str | None = None
 
 
 class ActionPatch(BaseModel):
@@ -187,6 +242,61 @@ class ActionPatch(BaseModel):
     project_id: str | None = None
     status_card_id: str | None = None
     due_date: date | None = None
+    domain: ActionDomain = Field(default=None)
+    owner_id: str | None = None
+
+
+class RoutineInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1)
+    active: bool = True
+    frequency: RoutineFrequency
+    weekdays: list[int] = Field(default_factory=list)
+    reminder_time: time
+    owner_id: str | None = None
+
+    @field_validator("weekdays")
+    @classmethod
+    def validate_weekdays(cls, weekdays: list[int]) -> list[int]:
+        if any(weekday < 1 or weekday > 7 for weekday in weekdays):
+            raise ValueError("Weekdays must use ISO values 1 through 7")
+        if len(set(weekdays)) != len(weekdays):
+            raise ValueError("Weekdays must not contain duplicates")
+        return sorted(weekdays)
+
+    @model_validator(mode="after")
+    def validate_schedule(self):
+        if self.frequency is RoutineFrequency.DAILY and self.weekdays:
+            raise ValueError("Daily routines must not set weekdays")
+        if self.frequency is RoutineFrequency.WEEKLY and len(self.weekdays) != 1:
+            raise ValueError("Weekly routines require exactly one weekday")
+        if self.frequency is RoutineFrequency.SELECTED_WEEKDAYS and not self.weekdays:
+            raise ValueError("Selected-weekday routines require weekdays")
+        return self
+
+
+class RoutinePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(default=None, min_length=1)
+    active: bool = Field(default=None)
+    frequency: RoutineFrequency = Field(default=None)
+    weekdays: list[int] = Field(default=None)
+    reminder_time: time = Field(default=None)
+    owner_id: str | None = None
+
+
+class ProposalAcceptInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: bool
+
+
+class RoutineOccurrenceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    occurrence_date: date | None = None
 
 
 class AssetInput(BaseModel):
@@ -372,7 +482,15 @@ ASSET_COLUMNS = """
 
 
 ACTION_COLUMNS = """
-    id, title, type, status, priority, project_id, status_card_id, due_date, created_at, updated_at
+    id, title, type, status, priority, project_id, status_card_id, due_date, domain, owner_id, created_at, updated_at
+"""
+
+ROUTINE_COLUMNS = """
+    id, title, active, frequency, weekdays, reminder_time, owner_id, created_at, updated_at
+"""
+
+ROUTINE_COMPLETION_COLUMNS = """
+    id, routine_id, occurrence_date, completed_at, created_at
 """
 
 HEALTH_WEIGHT_COLUMNS = """
@@ -833,9 +951,62 @@ def run_migrations() -> None:
                     project_id TEXT REFERENCES projects(slug) ON DELETE SET NULL,
                     status_card_id TEXT REFERENCES status_cards(id) ON DELETE SET NULL,
                     due_date DATE,
+                    domain TEXT NOT NULL DEFAULT 'project' CONSTRAINT actions_domain_check CHECK (domain IN ('administratie', 'huis_gezin', 'project')),
+                    owner_id TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
+                """
+            )
+            cursor.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS domain TEXT")
+            cursor.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS owner_id TEXT")
+            cursor.execute("UPDATE actions SET domain = 'project' WHERE domain IS NULL")
+            cursor.execute("ALTER TABLE actions ALTER COLUMN domain SET DEFAULT 'project'")
+            cursor.execute("ALTER TABLE actions ALTER COLUMN domain SET NOT NULL")
+            cursor.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint WHERE conname = 'actions_domain_check'
+                    ) THEN
+                        ALTER TABLE actions ADD CONSTRAINT actions_domain_check
+                        CHECK (domain IN ('administratie', 'huis_gezin', 'project'));
+                    END IF;
+                END $$
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS routines (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    frequency TEXT NOT NULL CHECK (frequency IN ('daily', 'weekly', 'selected_weekdays')),
+                    weekdays JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(weekdays) = 'array'),
+                    reminder_time TIME NOT NULL,
+                    owner_id TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS routine_completions (
+                    id TEXT PRIMARY KEY,
+                    routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+                    occurrence_date DATE NOT NULL,
+                    completed_at TIMESTAMPTZ NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (routine_id, occurrence_date)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS routine_completions_routine_occurrence_idx
+                ON routine_completions (routine_id, occurrence_date)
                 """
             )
             cursor.execute(
@@ -962,12 +1133,92 @@ def run_migrations() -> None:
                 WHERE external_record_id IS NOT NULL
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS briefing_runs (
+                    id TEXT PRIMARY KEY,
+                    trigger TEXT NOT NULL CHECK (trigger IN ('manual', 'scheduled')),
+                    status TEXT NOT NULL CHECK (status IN ('Running', 'Completed', 'Failed', 'Timed out')),
+                    scheduled_for DATE,
+                    briefing JSONB,
+                    validation_error TEXT,
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS briefing_runs_one_active_idx
+                ON briefing_runs ((true))
+                WHERE status = 'Running'
+                """
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS briefing_runs_scheduled_day_idx
+                ON briefing_runs (scheduled_for)
+                WHERE trigger = 'scheduled' AND status IN ('Running', 'Completed')
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS briefing_proposals (
+                    id TEXT PRIMARY KEY,
+                    briefing_id TEXT NOT NULL REFERENCES briefing_runs(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    record_type TEXT NOT NULL CHECK (record_type IN ('action', 'routine')),
+                    record_id TEXT NOT NULL,
+                    expected_updated_at TIMESTAMPTZ NOT NULL,
+                    changes JSONB NOT NULL,
+                    source_context JSONB NOT NULL,
+                    expected_impact TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected', 'failed')) DEFAULT 'pending',
+                    result JSONB,
+                    decided_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS briefing_proposal_audits (
+                    id TEXT PRIMARY KEY,
+                    briefing_id TEXT NOT NULL REFERENCES briefing_runs(id) ON DELETE CASCADE,
+                    proposal_id TEXT NOT NULL REFERENCES briefing_proposals(id) ON DELETE CASCADE,
+                    decision TEXT NOT NULL CHECK (decision IN ('accepted', 'rejected', 'failed')),
+                    result JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS briefing_proposals_briefing_idx
+                ON briefing_proposals (briefing_id, created_at)
+                """
+            )
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     run_migrations()
-    yield
+    stop = asyncio.Event()
+    task = (
+        asyncio.create_task(briefing_scheduler(stop))
+        if os.environ.get("BRIEFING_SCHEDULER_ENABLED", "true").lower() == "true"
+        else None
+    )
+    try:
+        yield
+    finally:
+        stop.set()
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 app = FastAPI(title="Bodin Control Center API", lifespan=lifespan)
@@ -1653,13 +1904,158 @@ def update_status_card(
     return updated
 
 
-@app.get("/api/actions")
-def list_actions(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+@app.get("/api/routines")
+def list_routines(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {ROUTINE_COLUMNS} FROM routines ORDER BY active DESC, reminder_time, title, id")
+        return cursor.fetchall()
+
+
+@app.get("/api/routines/due")
+def list_due_routines(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    return due_routines_for_date(connection, product_local_date())
+
+
+@app.get("/api/routines/{routine_id}")
+def get_routine(routine_id: str, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {ROUTINE_COLUMNS} FROM routines WHERE id = %s", (routine_id,))
+        routine = cursor.fetchone()
+    if routine is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Routine not found")
+    return routine
+
+
+@app.post("/api/routines", status_code=status.HTTP_201_CREATED)
+def create_routine(routine: RoutineInput, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    values = routine.model_dump()
+    values["id"] = str(uuid4())
+    values["weekdays"] = json.dumps(values["weekdays"])
     with connection.cursor() as cursor:
         cursor.execute(
-            f"SELECT {ACTION_COLUMNS} FROM actions "
-            "ORDER BY CASE status WHEN 'Open' THEN 0 WHEN 'Bezig' THEN 1 WHEN 'Later' THEN 2 ELSE 3 END, "
+            f"""
+            INSERT INTO routines (id, title, active, frequency, weekdays, reminder_time, owner_id)
+            VALUES (%(id)s, %(title)s, %(active)s, %(frequency)s, %(weekdays)s::jsonb, %(reminder_time)s, %(owner_id)s)
+            RETURNING {ROUTINE_COLUMNS}
+            """,
+            values,
+        )
+        return cursor.fetchone()
+
+
+@app.patch("/api/routines/{routine_id}")
+def update_routine(
+    routine_id: str, routine: RoutinePatch, connection: psycopg.Connection = Depends(get_connection)
+) -> dict:
+    changes = routine.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="No routine fields supplied")
+    existing = get_routine(routine_id, connection)
+    candidate = RoutineInput.model_validate(
+        {
+            "title": existing["title"],
+            "active": existing["active"],
+            "frequency": existing["frequency"],
+            "weekdays": existing["weekdays"],
+            "reminder_time": existing["reminder_time"],
+            "owner_id": existing["owner_id"],
+            **changes,
+        }
+    )
+    values = candidate.model_dump(include=set(changes))
+    columns = []
+    for column in values:
+        columns.append(f"{column} = %({column})s::jsonb" if column == "weekdays" else f"{column} = %({column})s")
+    if "weekdays" in values:
+        values["weekdays"] = json.dumps(values["weekdays"])
+    values["id"] = routine_id
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"UPDATE routines SET {', '.join(columns)}, updated_at = CURRENT_TIMESTAMP "
+            f"WHERE id = %(id)s RETURNING {ROUTINE_COLUMNS}",
+            values,
+        )
+        return cursor.fetchone()
+
+
+@app.get("/api/routines/{routine_id}/completions")
+def list_routine_completions(
+    routine_id: str, connection: psycopg.Connection = Depends(get_connection)
+) -> list[dict]:
+    get_routine(routine_id, connection)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {ROUTINE_COMPLETION_COLUMNS} FROM routine_completions "
+            "WHERE routine_id = %s ORDER BY occurrence_date DESC, completed_at DESC",
+            (routine_id,),
+        )
+        return cursor.fetchall()
+
+
+@app.post("/api/routines/{routine_id}/complete")
+def complete_routine(
+    routine_id: str,
+    occurrence: RoutineOccurrenceInput,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    get_routine(routine_id, connection)
+    occurrence_date = occurrence.occurrence_date or product_local_date()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO routine_completions (id, routine_id, occurrence_date, completed_at)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (routine_id, occurrence_date) DO NOTHING
+            RETURNING {ROUTINE_COMPLETION_COLUMNS}
+            """,
+            (str(uuid4()), routine_id, occurrence_date, datetime.now(UTC)),
+        )
+        completion = cursor.fetchone()
+        if completion is None:
+            cursor.execute(
+                f"SELECT {ROUTINE_COMPLETION_COLUMNS} FROM routine_completions "
+                "WHERE routine_id = %s AND occurrence_date = %s",
+                (routine_id, occurrence_date),
+            )
+            completion = cursor.fetchone()
+        return completion
+
+
+@app.post("/api/routines/{routine_id}/uncomplete")
+def uncomplete_routine(
+    routine_id: str,
+    occurrence: RoutineOccurrenceInput,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    get_routine(routine_id, connection)
+    occurrence_date = occurrence.occurrence_date or product_local_date()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM routine_completions WHERE routine_id = %s AND occurrence_date = %s RETURNING id",
+            (routine_id, occurrence_date),
+        )
+        removed = cursor.fetchone() is not None
+    return {"routine_id": routine_id, "occurrence_date": occurrence_date, "removed": removed}
+
+
+@app.get("/api/actions")
+def list_actions(
+    domain: ActionDomain | None = Query(default=None),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> list[dict]:
+    with connection.cursor() as cursor:
+        query = f"SELECT {ACTION_COLUMNS} FROM actions"
+        parameters: tuple[str, ...] = ()
+        if domain is not None:
+            query += " WHERE domain = %s"
+            parameters = (domain.value,)
+        query += (
+            " ORDER BY CASE status WHEN 'Open' THEN 0 WHEN 'Bezig' THEN 1 WHEN 'Later' THEN 2 ELSE 3 END, "
             "due_date NULLS LAST, updated_at DESC"
+        )
+        cursor.execute(
+            query,
+            parameters,
         )
         return cursor.fetchall()
 
@@ -1681,8 +2077,8 @@ def create_action(action: ActionInput, connection: psycopg.Connection = Depends(
     with connection.cursor() as cursor:
         cursor.execute(
             f"""
-            INSERT INTO actions (id, title, type, status, priority, project_id, status_card_id, due_date)
-            VALUES (%(id)s, %(title)s, %(type)s, %(status)s, %(priority)s, %(project_id)s, %(status_card_id)s, %(due_date)s)
+            INSERT INTO actions (id, title, type, status, priority, project_id, status_card_id, due_date, domain, owner_id)
+            VALUES (%(id)s, %(title)s, %(type)s, %(status)s, %(priority)s, %(project_id)s, %(status_card_id)s, %(due_date)s, %(domain)s, %(owner_id)s)
             RETURNING {ACTION_COLUMNS}
             """,
             values,
@@ -1751,3 +2147,291 @@ def update_asset(asset_id: str, asset: AssetPatch, connection: psycopg.Connectio
     if updated is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
     return updated
+
+
+BRIEFING_RUN_COLUMNS = """
+    id, trigger, status, scheduled_for, briefing, validation_error, started_at, finished_at, created_at
+"""
+BRIEFING_PROPOSAL_COLUMNS = """
+    id, briefing_id, title, rationale, record_type, record_id, expected_updated_at, changes,
+    source_context, expected_impact, status, result, decided_at, created_at
+"""
+
+
+def briefing_context(connection: psycopg.Connection, now: datetime) -> dict:
+    local_now = now.astimezone(PRODUCT_TIMEZONE)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT id, title, status, priority, due_date, domain, updated_at FROM actions "
+            "WHERE status != 'Klaar' ORDER BY due_date NULLS LAST, updated_at DESC LIMIT 20"
+        )
+        actions = cursor.fetchall()
+        cursor.execute("SELECT slug, display_name, status, personal_status FROM projects ORDER BY display_name")
+        projects = cursor.fetchall()
+        cursor.execute(
+            "SELECT title, status, facts, next_safe_step FROM status_cards "
+            "WHERE resolved_at IS NULL ORDER BY updated_at DESC LIMIT 12"
+        )
+        cards = cursor.fetchall()
+        cursor.execute(f"SELECT name, status, type FROM assets ORDER BY name")
+        assets = cursor.fetchall()
+        cursor.execute(
+            "SELECT measured_at, normalized_kg, source FROM health_weights "
+            "ORDER BY measured_at DESC LIMIT 7"
+        )
+        weights = cursor.fetchall()
+        cursor.execute(
+            "SELECT activity_type, started_at, duration_seconds, source FROM health_activities "
+            "ORDER BY started_at DESC LIMIT 10"
+        )
+        activities = cursor.fetchall()
+
+    schedule = calendar_schedule()
+    routines = due_routines_for_date(connection, local_now.date())
+    return {
+        "generated_at": now,
+        "agenda": {"status": schedule["status"], "events": schedule["events"][:8]},
+        "actions": actions,
+        "routines_due": [
+            {"id": routine["id"], "title": routine["title"], "reminder_time": routine["reminder_time"], "updated_at": routine["updated_at"]}
+            for routine in routines
+        ],
+        "projects": projects,
+        "status_cards": cards,
+        "pulse": assets,
+        "health": {"weights": weights, "activities": activities},
+    }
+
+
+def persist_briefing_proposals(
+    connection: psycopg.Connection, briefing_id: str, proposals: list[BriefingProposal]
+) -> None:
+    if not proposals:
+        return
+    values = []
+    for proposal in proposals:
+        item = proposal.model_dump(mode="json")
+        values.append(
+            {
+                "id": str(uuid4()),
+                "briefing_id": briefing_id,
+                **item,
+                "changes": json.dumps(item["changes"]),
+                "source_context": json.dumps(item["source_context"]),
+            }
+        )
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO briefing_proposals (
+                id, briefing_id, title, rationale, record_type, record_id, expected_updated_at,
+                changes, source_context, expected_impact
+            ) VALUES (
+                %(id)s, %(briefing_id)s, %(title)s, %(rationale)s, %(record_type)s, %(record_id)s,
+                %(expected_updated_at)s, %(changes)s::jsonb, %(source_context)s::jsonb, %(expected_impact)s
+            )
+            """,
+            values,
+        )
+
+
+def record_proposal_audit(
+    connection: psycopg.Connection, proposal: dict, decision: str, result: dict
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO briefing_proposal_audits (id, briefing_id, proposal_id, decision, result)
+            VALUES (%s, %s, %s, %s, %s::jsonb)
+            """,
+            (str(uuid4()), proposal["briefing_id"], proposal["id"], decision, json.dumps(result, default=str)),
+        )
+
+
+def decide_briefing_proposal(connection: psycopg.Connection, proposal_id: str, decision: str) -> dict | None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {BRIEFING_PROPOSAL_COLUMNS} FROM briefing_proposals WHERE id = %s FOR UPDATE",
+            (proposal_id,),
+        )
+        proposal = cursor.fetchone()
+    if proposal is None:
+        return None
+    if proposal["status"] != "pending":
+        return proposal
+    if decision == "rejected":
+        result = {"message": "Proposal rejected; no domain record changed."}
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE briefing_proposals SET status = 'rejected', result = %s::jsonb, decided_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (json.dumps(result), proposal_id),
+            )
+        proposal["status"], proposal["result"] = "rejected", result
+        record_proposal_audit(connection, proposal, "rejected", result)
+        return proposal
+
+    try:
+        columns = ACTION_COLUMNS if proposal["record_type"] == "action" else ROUTINE_COLUMNS
+        table = "actions" if proposal["record_type"] == "action" else "routines"
+        with connection.cursor() as cursor:
+            cursor.execute(f"SELECT {columns} FROM {table} WHERE id = %s FOR UPDATE", (proposal["record_id"],))
+            target = cursor.fetchone()
+        if target is None:
+            result = {"message": "Proposal target no longer exists."}
+            proposal["status"], proposal["result"] = "failed", result
+        elif target["updated_at"] != proposal["expected_updated_at"]:
+            result = {"message": "Proposal target changed after the briefing."}
+            proposal["status"], proposal["result"] = "failed", result
+        else:
+            updated = (
+                update_action(proposal["record_id"], ActionPatch.model_validate(proposal["changes"]), connection)
+                if proposal["record_type"] == "action"
+                else update_routine(proposal["record_id"], RoutinePatch.model_validate(proposal["changes"]), connection)
+            )
+            result = {"record_id": updated["id"], "updated_at": updated["updated_at"]}
+            proposal["status"], proposal["result"] = "accepted", result
+    except (ValidationError, HTTPException) as error:
+        result = {"message": "Proposal target or changes are no longer valid.", "detail": str(error)}
+        proposal["status"], proposal["result"] = "failed", result
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE briefing_proposals SET status = %s, result = %s::jsonb, decided_at = CURRENT_TIMESTAMP WHERE id = %s",
+            (proposal["status"], json.dumps(proposal["result"], default=str), proposal_id),
+        )
+    record_proposal_audit(connection, proposal, proposal["status"], proposal["result"])
+    return proposal
+
+
+def create_briefing_run(
+    connection: psycopg.Connection,
+    trigger: str,
+    scheduled_for: date | None = None,
+) -> dict | None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO briefing_runs (id, trigger, status, scheduled_for)
+            VALUES (%s, %s, 'Running', %s)
+            ON CONFLICT DO NOTHING
+            RETURNING {BRIEFING_RUN_COLUMNS}
+            """,
+            (str(uuid4()), trigger, scheduled_for),
+        )
+        return cursor.fetchone()
+
+
+def execute_briefing_run(run_id: str) -> None:
+    with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM briefing_runs WHERE id = %s AND status = 'Running'", (run_id,))
+            if cursor.fetchone() is None:
+                return
+        try:
+            context = briefing_context(connection, datetime.now(UTC))
+            output = CodexRuntime(
+                os.environ.get("CODEX_RUNTIME_URL", ""),
+                os.environ.get("CODEX_RUNTIME_TOKEN", ""),
+            ).run(context)
+        except BriefingRuntimeError as error:
+            briefing_status = "Timed out" if isinstance(error, BriefingRuntimeTimeout) else "Failed"
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE briefing_runs
+                    SET status = %s, validation_error = %s, finished_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status = 'Running'
+                    """,
+                    (briefing_status, str(error), run_id),
+                )
+        else:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE briefing_runs
+                    SET status = 'Completed', briefing = %s::jsonb, finished_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND status = 'Running'
+                    """,
+                    (json.dumps(output.model_dump(mode="json")), run_id),
+                )
+            persist_briefing_proposals(connection, run_id, output.proposals)
+
+
+def schedule_briefing_if_due() -> None:
+    now = datetime.now(UTC)
+    with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT finished_at FROM briefing_runs WHERE status = 'Completed' "
+                "ORDER BY finished_at DESC LIMIT 1"
+            )
+            previous = cursor.fetchone()
+        last_completed_at = previous["finished_at"] if previous else None
+        if not schedule_due(now, last_completed_at):
+            return
+        run = create_briefing_run(connection, "scheduled", now.astimezone(PRODUCT_TIMEZONE).date())
+        if run is None:
+            return
+        run_id = run["id"]
+    execute_briefing_run(run_id)
+
+
+async def briefing_scheduler(stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        await asyncio.to_thread(schedule_briefing_if_due)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=60)
+        except TimeoutError:
+            pass
+
+
+@app.get("/api/briefings")
+def list_briefings(connection: psycopg.Connection = Depends(get_connection)) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(f"SELECT {BRIEFING_RUN_COLUMNS} FROM briefing_runs ORDER BY created_at DESC LIMIT 20")
+        return cursor.fetchall()
+
+
+@app.get("/api/briefing-proposals")
+def list_briefing_proposals(
+    briefing_id: str | None = Query(default=None), connection: psycopg.Connection = Depends(get_connection)
+) -> list[dict]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {BRIEFING_PROPOSAL_COLUMNS} FROM briefing_proposals "
+            "WHERE (%s IS NULL OR briefing_id = %s) ORDER BY created_at DESC LIMIT 50",
+            (briefing_id, briefing_id),
+        )
+        return cursor.fetchall()
+
+
+@app.post("/api/briefing-proposals/{proposal_id}/accept")
+def accept_briefing_proposal(
+    proposal_id: str, confirmation: ProposalAcceptInput, connection: psycopg.Connection = Depends(get_connection)
+) -> dict:
+    if not confirmation.confirmed:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Explicit confirmation is required")
+    proposal = decide_briefing_proposal(connection, proposal_id, "accepted")
+    if proposal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Briefing proposal not found")
+    return proposal
+
+
+@app.post("/api/briefing-proposals/{proposal_id}/reject")
+def reject_briefing_proposal(proposal_id: str, connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    proposal = decide_briefing_proposal(connection, proposal_id, "rejected")
+    if proposal is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Briefing proposal not found")
+    return proposal
+
+
+@app.post("/api/briefings/refresh", status_code=status.HTTP_202_ACCEPTED)
+def refresh_briefing(
+    background_tasks: BackgroundTasks,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    run = create_briefing_run(connection, "manual")
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A briefing run is already active.")
+    background_tasks.add_task(execute_briefing_run, run["id"])
+    return run
