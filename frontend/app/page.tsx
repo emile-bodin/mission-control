@@ -6,7 +6,8 @@ type Action = { id: string; title: string; status: "Open" | "Bezig" | "Klaar" | 
 type CalendarEvent = { starts_at: string; summary: string };
 type Schedule = { status: string; events: CalendarEvent[] };
 type Project = { slug: string; display_name: string; status: string; personal_status: string };
-type Asset = { id: string; name: string; status: "Onbekend" | "OK" | "Let op" | "Fout" };
+type PulseResource = { id: string; name: string; type: string; status: string };
+type Homelab = { available: boolean; resources: PulseResource[] };
 type Weight = { id: string; measured_at: string; normalized_kg: number };
 type Activity = { id: string; activity_type: string; started_at: string; duration_seconds: number | null };
 
@@ -24,12 +25,12 @@ async function getJson<T>(path: string, fallback: T): Promise<T> {
 }
 
 export default async function TodayPage() {
-  const [cards, actions, schedule, projects, assets, weights, activities] = await Promise.all([
+  const [cards, actions, schedule, projects, homelab, weights, activities] = await Promise.all([
     getJson<StatusCard[]>("/api/status-cards", []),
     getJson<Action[]>("/api/actions", []),
     getJson<Schedule>("/api/calendar/schedule", { status: "Onbekend", events: [] }),
     getJson<Project[]>("/api/projects", []),
-    getJson<Asset[]>("/api/assets", []),
+    getJson<Homelab>("/api/homelab", { available: false, resources: [] }),
     getJson<Weight[]>("/api/health/weights", []),
     getJson<Activity[]>("/api/health/activities", [])
   ]);
@@ -41,7 +42,7 @@ export default async function TodayPage() {
   const latestWeight = weights[0];
   const latestActivity = activities[0];
   const attentionCount = openCards.filter((card) => card.status === "Actie nodig" || card.status === "Geblokkeerd").length;
-  const pulseOk = assets.filter((asset) => asset.status === "OK").length;
+  const pulseOnline = homelab.resources.filter((resource) => resource.status.toLowerCase() === "online").length;
   const calendarConnected = schedule.status === "Beschikbaar";
 
   return <main className="mx-auto max-w-[1440px] px-5 py-8 sm:px-8 lg:px-10 lg:py-9">
@@ -57,7 +58,7 @@ export default async function TodayPage() {
           <Insight>{openActions.length ? `${openActions.length} open taak${openActions.length === 1 ? "" : "en"}${attentionCount ? ` · ${attentionCount} vraagt aandacht` : ""}.` : "Open taken: geen bekend."}</Insight>
           <Insight>{latestWeight ? `Laatste gewicht: ${latestWeight.normalized_kg.toFixed(1)} kg.` : "Health sync: Unknown."}</Insight>
           <Insight>{activeProjects.length ? `${activeProjects.length} actief project${activeProjects.length === 1 ? "" : "en"} bekend.` : "Projectstatus: Unknown."}</Insight>
-          <Insight>{assets.length ? `Pulse: ${pulseOk} van ${assets.length} assets met status OK.` : "Pulse status: Unknown."}</Insight>
+          <Insight>{homelab.available ? `Pulse: ${pulseOnline} van ${homelab.resources.length} modules online.` : "Pulse status: Unknown."}</Insight>
         </ul>
         <p className="mt-auto pt-10 text-xs text-slate-500">Statische samenvatting op basis van beschikbare dashboarddata.</p>
       </Panel>
@@ -85,7 +86,7 @@ export default async function TodayPage() {
     <section className="mt-5 grid gap-5 lg:grid-cols-[1.12fr_0.9fr_0.9fr]">
       <Panel title="Quick Access" className="min-h-[10rem]"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><QuickAccess href="/actions/new" icon="＋" label="Nieuwe taak" /><QuickAccess icon="♡" label="Health loggen" /><QuickAccess icon="▤" label="Nieuwe notitie" /><QuickAccess icon="◎" label="Focus starten" /></div></Panel>
       <Panel title="Actieve projecten" icon="⌘" action={<Link className="cockpit-link" href="/projects">Alle projecten</Link>}><div className="space-y-4">{activeProjects.length ? activeProjects.map((project) => <Link className="block" href={`/projects/${project.slug}`} key={project.slug}><div className="flex justify-between gap-3 text-sm"><span className="truncate font-medium text-slate-200">{project.display_name}</span><span className="text-xs text-slate-500">Voortgang: Unknown</span></div><div className="mt-2 h-1.5 rounded-full bg-slate-800" /></Link>) : <UnknownProjects />}</div></Panel>
-      <Panel title="Pulse Overview" action={<Link className="cockpit-link" href="/homelab">Pulse bekijken</Link>}><div className="space-y-3">{["Proxmox", "PBS Backup", "Home Network"].map((name) => <PulseItem asset={assets.find((item) => item.name.toLowerCase().includes(name.toLowerCase().split(" ")[0].toLowerCase()))} name={name} key={name} />)}</div></Panel>
+      <Panel title="Pulse Overview" action={<Link className="cockpit-link" href="/homelab">Pulse bekijken</Link>}><div className="space-y-3">{homelab.resources.slice(0, 3).map((resource) => <PulseItem resource={resource} key={resource.id} />)}{!homelab.resources.length && <p className="text-sm text-slate-500">Pulse status: Unknown.</p>}</div></Panel>
     </section>
   </main>;
 }
@@ -100,10 +101,10 @@ function QuickAccess({ href, icon, label }: { href?: string; icon: string; label
 function CalendarPlaceholder({ connected }: { connected: boolean }) { return <div className="cockpit-inset rounded-xl border-dashed p-4"><p className="text-sm font-medium text-slate-300">{connected ? "Geen komende afspraken" : "Agenda niet gekoppeld"}</p><p className="mt-1 text-xs text-slate-500">{connected ? "Geen afspraken in huidige kalenderfeed." : "Google Calendar-status: Unknown."}</p><div className="mt-4 space-y-2 opacity-40" aria-hidden="true"><div className="h-12 rounded-lg bg-slate-800" /><div className="h-12 rounded-lg bg-slate-800" /><div className="h-12 rounded-lg bg-slate-800" /></div></div>; }
 function WeightTrend({ weights }: { weights: Weight[] }) { if (weights.length < 2) return <div className="mt-5 rounded-xl border border-dashed border-slate-700 px-4 py-5 text-xs text-slate-500">Gewichtstrend: Unknown — minimaal twee metingen nodig.</div>; const values = weights.map((weight) => weight.normalized_kg); const min = Math.min(...values); const max = Math.max(...values); const range = max - min || 1; const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${90 - ((value - min) / range) * 65}`).join(" "); return <figure className="mt-5"><figcaption className="mb-2 flex justify-between text-xs text-slate-500"><span>Gewichtstrend</span><span>{min.toFixed(1)}–{max.toFixed(1)} kg</span></figcaption><svg className="h-24 w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Gewichtstrend van beschikbare metingen"><path d="M0 90H100" stroke="currentColor" className="text-slate-700" strokeWidth="1" vectorEffect="non-scaling-stroke" /><polyline points={points} fill="none" stroke="currentColor" className="text-indigo-400" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg><div className="flex justify-between text-[11px] text-slate-600"><span>{formatShortDate(weights[0].measured_at)}</span><span>{formatShortDate(weights[weights.length - 1].measured_at)}</span></div></figure>; }
 function UnknownProjects() { return <>{["Project 1", "Project 2", "Project 3"].map((name) => <div key={name}><div className="flex justify-between text-sm"><span className="text-slate-500">{name}</span><span className="text-xs text-slate-600">Unknown</span></div><div className="mt-2 h-1.5 rounded-full bg-slate-800" /></div>)}</>; }
-function PulseItem({ name, asset }: { name: string; asset?: Asset }) { const label = asset ? pulseLabel(asset.status) : "Unknown"; return <div className="flex items-center justify-between gap-3 text-sm"><span className="text-slate-300">{name}</span><span className={`inline-flex items-center gap-1.5 text-xs ${label === "Online" ? "text-emerald-400" : "text-slate-500"}`}><span className={`h-2 w-2 rounded-full ${label === "Online" ? "bg-emerald-400" : "bg-slate-600"}`} />{label}</span></div>; }
+function PulseItem({ resource }: { resource: PulseResource }) { const label = pulseLabel(resource.status); return <div className="flex items-center justify-between gap-3 text-sm"><span className="min-w-0 truncate text-slate-300">{resource.name}</span><span className={`inline-flex shrink-0 items-center gap-1.5 text-xs ${label === "Online" ? "text-emerald-400" : "text-slate-500"}`}><span className={`h-2 w-2 rounded-full ${label === "Online" ? "bg-emerald-400" : "bg-slate-600"}`} />{label}</span></div>; }
 function compareActions(a: Action, b: Action) { return (a.due_date || "9999-12-31").localeCompare(b.due_date || "9999-12-31") || a.updated_at.localeCompare(b.updated_at); }
 function isActive(value: string) { return value.toLowerCase() === "active"; }
-function pulseLabel(status: Asset["status"]) { return status === "OK" ? "Online" : status === "Onbekend" ? "Unknown" : status; }
+function pulseLabel(status: string) { return status === "online" ? "Online" : status === "Unknown" ? "Unknown" : status; }
 function priorityClass(priority: string) { const value = priority.toLowerCase(); return value.includes("high") || value.includes("hoog") ? "bg-red-500/15 text-red-300" : value.includes("medium") || value.includes("middel") ? "bg-amber-500/15 text-amber-300" : value.includes("low") || value.includes("laag") ? "bg-blue-500/15 text-blue-300" : "bg-slate-700 text-slate-300"; }
 function formatDate(value: string) { return new Intl.DateTimeFormat("nl-NL", { weekday: "short", day: "numeric", month: "short", timeZone: "Europe/Amsterdam" }).format(new Date(value)); }
 function formatClock(value: string) { return new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Amsterdam" }).format(new Date(value)); }

@@ -10,7 +10,7 @@ import os
 import secrets
 from typing import Any
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request as UrlRequest, urlopen
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -55,6 +55,85 @@ class AssetStatus(str, Enum):
 
 
 PRODUCT_TIMEZONE = ZoneInfo("Europe/Amsterdam")
+PULSE_VISIBLE_RESOURCE_TYPES = {"agent", "app-container", "pbs", "pmg", "system-container", "vm"}
+
+
+def pulse_value(value: object) -> str:
+    return value if isinstance(value, str) and value else "Unknown"
+
+
+def pulse_homelab() -> dict:
+    unavailable = {"available": False, "status": "Unknown", "resources": [], "docker_hosts": [], "last_updated_at": "Unknown"}
+    base_url = os.environ.get("PULSE_BASE_URL", "").rstrip("/")
+    if not base_url:
+        return unavailable
+
+    token = os.environ.get("PULSE_API_TOKEN", "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    def get_json(path: str) -> dict:
+        with urlopen(UrlRequest(f"{base_url}{path}", headers=headers), timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Pulse response is not an object")
+        return payload
+
+    try:
+        first_page = get_json("/api/resources?page=1&limit=100")
+        meta = first_page.get("meta")
+        total_pages = meta.get("totalPages", 1) if isinstance(meta, dict) else 1
+        if not isinstance(total_pages, int) or total_pages < 1:
+            raise ValueError("Pulse totalPages is invalid")
+        pages = [first_page, *(get_json(f"/api/resources?page={page}&limit=100") for page in range(2, total_pages + 1))]
+        summary = get_json("/api/state/summary")
+    except (OSError, ValueError, UnicodeDecodeError, URLError):
+        return unavailable
+
+    resources = []
+    for page in pages:
+        page_resources = page.get("data")
+        if not isinstance(page_resources, list):
+            continue
+        for resource in page_resources:
+            if not isinstance(resource, dict) or resource.get("type") not in PULSE_VISIBLE_RESOURCE_TYPES:
+                continue
+            docker = resource.get("docker") if isinstance(resource.get("docker"), dict) else {}
+            resources.append(
+                {
+                    "id": pulse_value(resource.get("id")),
+                    "name": pulse_value(resource.get("name")),
+                    "type": pulse_value(resource.get("type")),
+                    "status": pulse_value(resource.get("status")),
+                    "parent_name": pulse_value(resource.get("parentName")),
+                    "last_seen": pulse_value(resource.get("lastSeen")),
+                    "updated_at": pulse_value(resource.get("updatedAt")),
+                    "runtime": pulse_value(docker.get("runtime")),
+                    "runtime_version": pulse_value(docker.get("runtimeVersion")),
+                }
+            )
+
+    docker_hosts = []
+    hosts = summary.get("dockerHosts")
+    for host in hosts if isinstance(hosts, list) else []:
+        if not isinstance(host, dict):
+            continue
+        docker_hosts.append(
+            {
+                "name": pulse_value(host.get("name")),
+                "containers": host.get("containers") if isinstance(host.get("containers"), int) else "Unknown",
+                "uptime_seconds": host.get("uptimeSeconds") if isinstance(host.get("uptimeSeconds"), int) else "Unknown",
+                "cpu_usage_percent": host.get("cpuUsagePercent") if isinstance(host.get("cpuUsagePercent"), (int, float)) else "Unknown",
+            }
+        )
+
+    last_updated_at = pulse_value(summary.get("lastUpdate"))
+    return {
+        "available": True,
+        "status": last_updated_at,
+        "resources": sorted(resources, key=lambda resource: (resource["type"], resource["name"])),
+        "docker_hosts": docker_hosts,
+        "last_updated_at": last_updated_at,
+    }
 
 
 def parse_ics_events(content: str, now: datetime | None = None) -> list[dict[str, str]]:
@@ -1710,6 +1789,11 @@ def list_assets(connection: psycopg.Connection = Depends(get_connection)) -> lis
     with connection.cursor() as cursor:
         cursor.execute(f"SELECT {ASSET_COLUMNS} FROM assets ORDER BY name")
         return cursor.fetchall()
+
+
+@app.get("/api/homelab")
+def homelab() -> dict:
+    return pulse_homelab()
 
 
 @app.get("/api/assets/{asset_id}")
