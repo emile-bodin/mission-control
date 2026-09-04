@@ -8,13 +8,13 @@ type Item = { href?: string; label: string; icon: string; exact?: boolean };
 const items: Item[] = [
   { href: "/", label: "Dashboard", icon: "⌂", exact: true },
   { href: "/agenda", label: "Agenda", icon: "□" },
-  { label: "Health", icon: "♡" },
+  { href: "/health", label: "Health", icon: "♡" },
   { href: "/projects", label: "Projecten", icon: "⌘" },
   { href: "/actions", label: "Taken", icon: "☑" },
-  { label: "Notities", icon: "▤" },
-  { label: "Routines", icon: "◉" },
+  { href: "/unavailable/notes", label: "Notities", icon: "▤" },
+  { href: "/routines", label: "Routines", icon: "◉" },
   { href: "/homelab", label: "Pulse", icon: "⌁" },
-  { label: "Instellingen", icon: "⚙" }
+  { href: "/unavailable/settings", label: "Instellingen", icon: "⚙" }
 ];
 
 export function Navigation() {
