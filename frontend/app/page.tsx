@@ -9,6 +9,7 @@ type Project = { slug: string; display_name: string; status: string; personal_st
 type Asset = { id: string; name: string; status: "Onbekend" | "OK" | "Let op" | "Fout" };
 type Weight = { id: string; measured_at: string; normalized_kg: number };
 type Activity = { id: string; activity_type: string; started_at: string; duration_seconds: number | null };
+type Briefing = { status: string; finished_at: string | null; briefing: { summary: string; facts: string[]; unknowns: string[] } | null };
 
 export const dynamic = "force-dynamic";
 
@@ -24,14 +25,15 @@ async function getJson<T>(path: string, fallback: T): Promise<T> {
 }
 
 export default async function TodayPage() {
-  const [cards, actions, schedule, projects, assets, weights, activities] = await Promise.all([
+  const [cards, actions, schedule, projects, assets, weights, activities, briefings] = await Promise.all([
     getJson<StatusCard[]>("/api/status-cards", []),
     getJson<Action[]>("/api/actions", []),
     getJson<Schedule>("/api/calendar/schedule", { status: "Onbekend", events: [] }),
     getJson<Project[]>("/api/projects", []),
     getJson<Asset[]>("/api/assets", []),
     getJson<Weight[]>("/api/health/weights", []),
-    getJson<Activity[]>("/api/health/activities", [])
+    getJson<Activity[]>("/api/health/activities", []),
+    getJson<Briefing[]>("/api/briefings", [])
   ]);
 
   const openActions = actions.filter((action) => action.status !== "Klaar").sort(compareActions);
@@ -43,6 +45,7 @@ export default async function TodayPage() {
   const attentionCount = openCards.filter((card) => card.status === "Actie nodig" || card.status === "Geblokkeerd").length;
   const pulseOk = assets.filter((asset) => asset.status === "OK").length;
   const calendarConnected = schedule.status === "Beschikbaar";
+  const latestBriefing = briefings.find((run) => run.status === "Completed" && run.briefing)?.briefing;
 
   return <main className="mx-auto max-w-[1440px] px-5 py-8 sm:px-8 lg:px-10 lg:py-9">
     <header className="flex flex-wrap items-start justify-between gap-6">
@@ -53,13 +56,7 @@ export default async function TodayPage() {
     <div className="mt-8 grid items-stretch gap-5 xl:grid-cols-2">
       <Panel title="AI Brief" icon="✦" className="min-h-[20rem]">
         <span className="inline-flex rounded-lg bg-indigo-500/15 px-2.5 py-1 text-xs font-medium text-indigo-300">✦ Top inzichten</span>
-        <ul className="mt-5 space-y-3 text-sm text-slate-300">
-          <Insight>{openActions.length ? `${openActions.length} open taak${openActions.length === 1 ? "" : "en"}${attentionCount ? ` · ${attentionCount} vraagt aandacht` : ""}.` : "Open taken: geen bekend."}</Insight>
-          <Insight>{latestWeight ? `Laatste gewicht: ${latestWeight.normalized_kg.toFixed(1)} kg.` : "Health sync: Unknown."}</Insight>
-          <Insight>{activeProjects.length ? `${activeProjects.length} actief project${activeProjects.length === 1 ? "" : "en"} bekend.` : "Projectstatus: Unknown."}</Insight>
-          <Insight>{assets.length ? `Pulse: ${pulseOk} van ${assets.length} assets met status OK.` : "Pulse status: Unknown."}</Insight>
-        </ul>
-        <p className="mt-auto pt-10 text-xs text-slate-500">Statische samenvatting op basis van beschikbare dashboarddata.</p>
+        {latestBriefing ? <><p className="mt-5 text-sm leading-6 text-slate-200">{latestBriefing.summary}</p><ul className="mt-5 space-y-3 text-sm text-slate-300">{latestBriefing.facts.slice(0, 4).map((fact) => <Insight key={fact}>{fact}</Insight>)}</ul><Link className="mt-auto pt-8 text-sm font-medium text-indigo-300 hover:text-indigo-200" href="/briefings">Open volledige AI Brief →</Link></> : <><ul className="mt-5 space-y-3 text-sm text-slate-300"><Insight>{openActions.length ? `${openActions.length} open taak${openActions.length === 1 ? "" : "en"}${attentionCount ? ` · ${attentionCount} vraagt aandacht` : ""}.` : "Open taken: geen bekend."}</Insight><Insight>{latestWeight ? `Laatste gewicht: ${latestWeight.normalized_kg.toFixed(1)} kg.` : "Health sync: Unknown."}</Insight><Insight>{activeProjects.length ? `${activeProjects.length} actief project${activeProjects.length === 1 ? "" : "en"} bekend.` : "Projectstatus: Unknown."}</Insight><Insight>{assets.length ? `Pulse: ${pulseOk} van ${assets.length} assets met status OK.` : "Pulse status: Unknown."}</Insight></ul><p className="mt-auto pt-10 text-xs text-slate-500">Nog geen gevalideerde AI Brief. Statische fallback op basis van dashboarddata.</p></>}
       </Panel>
 
       <Panel title="Agenda" icon="□" action={<Link className="cockpit-link" href="/agenda">Volledige agenda</Link>}>
