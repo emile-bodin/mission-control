@@ -69,6 +69,20 @@ class AssetStatus(str, Enum):
     ERROR = "Fout"
 
 
+class StreamEntryKind(str, Enum):
+    TEXT = "text"
+    SNIPPET = "snippet"
+    QUICK_TASK = "quick_task"
+    VOICE_REFERENCE = "voice_reference"
+
+
+class StreamEntryStatus(str, Enum):
+    CAPTURED = "captured"
+    TRIAGED = "triaged"
+    ARCHIVED = "archived"
+    DELETED = "deleted"
+
+
 PRODUCT_TIMEZONE = ZoneInfo("Europe/Amsterdam")
 PULSE_VISIBLE_RESOURCE_TYPES = {"agent", "app-container", "pbs", "pmg", "system-container", "vm"}
 
@@ -399,6 +413,56 @@ class AssetPatch(BaseModel):
     address: str | None = None
     environment: str | None = None
     status: AssetStatus | None = None
+
+
+class VoiceReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source: str = Field(min_length=1, max_length=80)
+    reference_id: str = Field(min_length=1, max_length=500)
+
+
+class StreamEntryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: StreamEntryKind
+    content: str | None = Field(default=None, max_length=4000)
+    voice_reference: VoiceReference | None = None
+    source_metadata: dict[str, str] = Field(default_factory=dict, max_length=10)
+
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("content must not be blank")
+        return value
+
+    @field_validator("source_metadata")
+    @classmethod
+    def validate_source_metadata(cls, value: dict[str, str]) -> dict[str, str]:
+        allowed = {"captured_at", "client", "reference", "source"}
+        for key, item in value.items():
+            if not key or len(key) > 100 or len(item) > 500:
+                raise ValueError("source_metadata key or value is too long")
+            if key not in allowed:
+                raise ValueError("source_metadata key is not allowed")
+        return value
+
+    @model_validator(mode="after")
+    def validate_kind_payload(self) -> "StreamEntryInput":
+        if self.kind is StreamEntryKind.VOICE_REFERENCE:
+            if self.content is not None or self.voice_reference is None:
+                raise ValueError("voice_reference requires voice_reference and no content")
+        elif self.content is None or self.voice_reference is not None:
+            raise ValueError("text, snippet and quick_task require content only")
+        return self
+
+
+class StreamEntryTriageInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     notes: str | None = None
 
 
@@ -956,6 +1020,37 @@ def get_connection() -> Generator[psycopg.Connection, None, None]:
 def run_migrations() -> None:
     with psycopg.connect(os.environ["DATABASE_URL"]) as connection:
         with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS stream_entries (
+                    id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('text', 'snippet', 'quick_task', 'voice_reference')),
+                    content TEXT,
+                    voice_reference JSONB,
+                    source_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    status TEXT NOT NULL CHECK (status IN ('captured', 'triaged', 'archived', 'deleted')),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (
+                        (kind = 'voice_reference' AND content IS NULL AND voice_reference IS NOT NULL)
+                        OR (kind != 'voice_reference' AND content IS NOT NULL AND voice_reference IS NULL)
+                    )
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS stream_entry_audits (
+                    id TEXT PRIMARY KEY,
+                    entry_id TEXT NOT NULL REFERENCES stream_entries(id),
+                    owner_id TEXT NOT NULL,
+                    event TEXT NOT NULL CHECK (event IN ('captured', 'triage_proposed', 'archived', 'deleted')),
+                    detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS projects (
@@ -2519,3 +2614,221 @@ def refresh_briefing(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A briefing run is already active.")
     background_tasks.add_task(execute_briefing_run, run["id"])
     return run
+
+
+STREAM_ENTRY_COLUMNS = """
+    id, owner_id, kind, content, voice_reference, source_metadata, status, created_at, updated_at
+"""
+
+
+def record_stream_entry_audit(
+    connection: psycopg.Connection, entry_id: str, owner_id: str, event: str, detail: dict[str, Any] | None = None
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO stream_entry_audits (id, entry_id, owner_id, event, detail)
+            VALUES (%s, %s, %s, %s, %s::jsonb)
+            """,
+            (str(uuid4()), entry_id, owner_id, event, json.dumps(detail or {})),
+        )
+
+
+def create_stream_entry(entry: StreamEntryInput, owner_id: str, connection: psycopg.Connection) -> dict:
+    values = entry.model_dump(mode="json")
+    values.update({"id": str(uuid4()), "owner_id": owner_id, "status": StreamEntryStatus.CAPTURED.value})
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            INSERT INTO stream_entries (id, owner_id, kind, content, voice_reference, source_metadata, status)
+            VALUES (%(id)s, %(owner_id)s, %(kind)s, %(content)s, %(voice_reference)s::jsonb,
+                    %(source_metadata)s::jsonb, %(status)s)
+            RETURNING {STREAM_ENTRY_COLUMNS}
+            """,
+            {
+                **values,
+                "kind": entry.kind.value,
+                "voice_reference": json.dumps(values["voice_reference"]) if values["voice_reference"] is not None else None,
+                "source_metadata": json.dumps(values["source_metadata"]),
+            },
+        )
+        result = cursor.fetchone()
+    record_stream_entry_audit(connection, result["id"], owner_id, "captured", {"kind": result["kind"]})
+    return result
+
+
+def get_stream_entry(entry_id: str, owner_id: str, connection: psycopg.Connection) -> dict:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {STREAM_ENTRY_COLUMNS} FROM stream_entries WHERE id = %s AND owner_id = %s",
+            (entry_id, owner_id),
+        )
+        result = cursor.fetchone()
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Stream entry not found")
+    return result
+
+
+def list_stream_entries(
+    owner_id: str, connection: psycopg.Connection, entry_status: StreamEntryStatus | None = None
+) -> list[dict]:
+    with connection.cursor() as cursor:
+        if entry_status is None:
+            cursor.execute(
+                f"SELECT {STREAM_ENTRY_COLUMNS} FROM stream_entries WHERE owner_id = %s AND status != 'deleted' "
+                "ORDER BY created_at DESC",
+                (owner_id,),
+            )
+        else:
+            cursor.execute(
+                f"SELECT {STREAM_ENTRY_COLUMNS} FROM stream_entries WHERE owner_id = %s AND status = %s "
+                "ORDER BY created_at DESC",
+                (owner_id, entry_status.value),
+            )
+        return cursor.fetchall()
+
+
+def change_stream_entry_status(
+    entry_id: str, owner_id: str, next_status: StreamEntryStatus, connection: psycopg.Connection
+) -> dict:
+    entry = get_stream_entry(entry_id, owner_id, connection)
+    if entry["status"] in {StreamEntryStatus.ARCHIVED.value, StreamEntryStatus.DELETED.value}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stream entry status transition is not allowed")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            UPDATE stream_entries SET status = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND owner_id = %s
+            RETURNING {STREAM_ENTRY_COLUMNS}
+            """,
+            (next_status.value, entry_id, owner_id),
+        )
+        result = cursor.fetchone()
+    record_stream_entry_audit(connection, entry_id, owner_id, next_status.value, {"from": entry["status"]})
+    return result
+
+
+def cortex_today(connection: psycopg.Connection) -> dict:
+    now = datetime.now(UTC)
+    today = product_local_date(now)
+    projects = list_projects(connection)
+    actions = list_actions(None, connection)
+    cards = list_status_cards(connection)
+    routines = due_routines_for_date(connection, today)
+    weights = list_health_weights(connection)
+    activities = list_health_activities(connection)
+    briefings = list_briefings(connection)
+    calendar = calendar_schedule()
+    homelab = pulse_homelab()
+
+    action_counts: dict[str, int] = {}
+    card_counts: dict[str, int] = {}
+    for action in actions:
+        if action["project_id"]:
+            action_counts[action["project_id"]] = action_counts.get(action["project_id"], 0) + 1
+    for card in cards:
+        if card["project_id"]:
+            card_counts[card["project_id"]] = card_counts.get(card["project_id"], 0) + 1
+    project_context = [
+        {**project, "action_count": action_counts.get(project["slug"], 0), "status_card_count": card_counts.get(project["slug"], 0), "source": "local"}
+        for project in projects
+    ]
+    chrono = [
+        {"kind": "calendar", "starts_at": event["starts_at"], "summary": event["summary"], "source": "Google Calendar ICS"}
+        for event in calendar["events"]
+    ] + [
+        {"kind": "routine", "id": routine["id"], "title": routine["title"], "reminder_time": routine["reminder_time"], "source": "local"}
+        for routine in routines
+    ] + [
+        {"kind": "action", "id": action["id"], "title": action["title"], "due_date": action["due_date"], "status": action["status"], "source": "local"}
+        for action in actions if action["status"] != ActionStatus.DONE.value
+    ]
+    return {
+        "generated_at": now.isoformat(),
+        "timezone": "Europe/Amsterdam",
+        "briefing": briefings[0] if briefings else None,
+        "projects": project_context,
+        "status_cards": cards,
+        "actions": actions,
+        "homelab": homelab,
+        "chrono": {"calendar_status": calendar["status"], "items": chrono},
+        "health": {
+            "weights": weights,
+            "activities": activities,
+            "unavailable": {
+                "steps": "Unavailable: geen stappenbron.",
+                "sleep": "Unavailable: geen slaapbron.",
+                "readiness": "Unavailable: geen herstelbron.",
+            },
+        },
+        "capabilities": {
+            "stream_dock": {"state": "available", "reason": "Paired-device owner authentication is required."},
+            "routine_complete": {"state": "available", "reason": "Lokale routine-completion API beschikbaar."},
+            "calendar_write": {"state": "unavailable", "reason": "Agenda is read-only via ICS."},
+            "voice_capture": {"state": "unavailable", "reason": "Geen browserdictatie- of audio-opnamebron."},
+            "coprocessor_inspector": {"state": "unavailable", "reason": "Geen feitelijke inspector-telemetriebron."},
+            "recently_triaged": {"state": "disabled", "reason": "Vereist eigenaar-authenticatie per Stream Dock-sessie."},
+        },
+    }
+
+
+@app.get("/api/cortex/today")
+def get_cortex_today(connection: psycopg.Connection = Depends(get_connection)) -> dict:
+    return cortex_today(connection)
+
+
+def require_stream_owner(
+    authorization: str | None = Header(default=None), connection: psycopg.Connection = Depends(get_connection)
+) -> dict:
+    return require_paired_device(authorization, connection)
+
+
+@app.post("/api/stream-entries", status_code=status.HTTP_201_CREATED)
+def post_stream_entry(
+    entry: StreamEntryInput,
+    device: dict = Depends(require_stream_owner),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    return create_stream_entry(entry, device["id"], connection)
+
+
+@app.get("/api/stream-entries")
+def get_stream_entries(
+    entry_status: StreamEntryStatus | None = Query(default=None, alias="status"),
+    device: dict = Depends(require_stream_owner),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> list[dict]:
+    return list_stream_entries(device["id"], connection, entry_status)
+
+
+@app.post("/api/stream-entries/{entry_id}/triage")
+def triage_stream_entry(
+    entry_id: str,
+    _: StreamEntryTriageInput,
+    device: dict = Depends(require_stream_owner),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    entry = get_stream_entry(entry_id, device["id"], connection)
+    if entry["status"] != StreamEntryStatus.CAPTURED.value:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only captured stream entries can be triaged")
+    proposal = {"kind": entry["kind"], "entry_id": entry["id"], "state": "pending_confirmation"}
+    record_stream_entry_audit(connection, entry["id"], device["id"], "triage_proposed", proposal)
+    return {"entry": entry, "proposal": proposal}
+
+
+@app.post("/api/stream-entries/{entry_id}/archive")
+def archive_stream_entry(
+    entry_id: str,
+    device: dict = Depends(require_stream_owner),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    return change_stream_entry_status(entry_id, device["id"], StreamEntryStatus.ARCHIVED, connection)
+
+
+@app.delete("/api/stream-entries/{entry_id}")
+def delete_stream_entry(
+    entry_id: str,
+    device: dict = Depends(require_stream_owner),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    return change_stream_entry_status(entry_id, device["id"], StreamEntryStatus.DELETED, connection)

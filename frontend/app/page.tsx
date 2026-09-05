@@ -10,6 +10,17 @@ type PulseResource = { id: string; name: string; type: string; status: string };
 type Homelab = { available: boolean; resources: PulseResource[] };
 type Weight = { id: string; measured_at: string; normalized_kg: number };
 type Activity = { id: string; activity_type: string; started_at: string; duration_seconds: number | null };
+type Briefing = { status: string; briefing: { summary: string; facts: string[]; unknowns: string[] } | null; validation_error: string | null };
+type CortexToday = {
+  briefing: Briefing | null;
+  projects: Project[];
+  status_cards: StatusCard[];
+  actions: Action[];
+  homelab: Homelab;
+  chrono: { calendar_status: string; items: Array<{ kind: string; starts_at?: string; summary?: string }> };
+  health: { weights: Weight[]; activities: Activity[] };
+  capabilities: Record<string, { state: string; reason: string }>;
+};
 
 export const dynamic = "force-dynamic";
 
@@ -25,15 +36,19 @@ async function getJson<T>(path: string, fallback: T): Promise<T> {
 }
 
 export default async function TodayPage() {
-  const [cards, actions, schedule, projects, homelab, weights, activities] = await Promise.all([
-    getJson<StatusCard[]>("/api/status-cards", []),
-    getJson<Action[]>("/api/actions", []),
-    getJson<Schedule>("/api/calendar/schedule", { status: "Onbekend", events: [] }),
-    getJson<Project[]>("/api/projects", []),
-    getJson<Homelab>("/api/homelab", { available: false, resources: [] }),
-    getJson<Weight[]>("/api/health/weights", []),
-    getJson<Activity[]>("/api/health/activities", [])
-  ]);
+  const cortex = await getJson<CortexToday | null>("/api/cortex/today", null);
+  const cards = cortex?.status_cards ?? [];
+  const actions = cortex?.actions ?? [];
+  const schedule: Schedule = {
+    status: cortex?.chrono.calendar_status ?? "Onbekend",
+    events: cortex?.chrono.items.flatMap((item) => item.kind === "calendar" && item.starts_at && item.summary ? [{ starts_at: item.starts_at, summary: item.summary }] : []) ?? []
+  };
+  const projects = cortex?.projects ?? [];
+  const homelab = cortex?.homelab ?? { available: false, resources: [] };
+  const weights = cortex?.health.weights ?? [];
+  const activities = cortex?.health.activities ?? [];
+  const briefing = cortex?.briefing?.briefing;
+  const streamDock = cortex?.capabilities.stream_dock;
 
   const openActions = actions.filter((action) => action.status !== "Klaar").sort(compareActions);
   const nextEvents = schedule.events.filter((event) => new Date(event.starts_at) >= new Date()).sort((a, b) => a.starts_at.localeCompare(b.starts_at)).slice(0, 4);
@@ -65,9 +80,9 @@ export default async function TodayPage() {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-space-xs font-mono text-mono-data-sm text-primary"><span className="material-symbols-outlined text-[16px]" aria-hidden="true">auto_awesome</span>VANDAAGSE BRIEF</div>
               <h1 className="mt-space-sm font-headline text-headline-xl text-on-surface" id="daily-brief-title">Vandaag, Emile.</h1>
-              <p className="mt-space-xs text-sm text-on-surface-variant">Overzicht op basis van beschikbare agenda-, actie-, project- en Pulse-data.</p>
+              <p className="mt-space-xs text-sm text-on-surface-variant">{briefing?.summary ?? "Geen geldige dagbriefing beschikbaar. Overzicht toont alleen beschikbare bronnen."}</p>
               <div className="mt-space-lg grid gap-space-sm lg:grid-cols-3">
-                <BriefItem icon="check_box" title={openActions.length ? `${openActions.length} open taken` : "Geen open taken"} detail={openActions[0]?.title ?? "Geen open taak bekend."} tone="primary" />
+                <BriefItem icon="auto_awesome" title={briefing ? "Briefing beschikbaar" : "Briefing: Unknown"} detail={briefing?.facts[0] ?? "Geen gevalideerde briefingfeiten."} tone="primary" />
                 <BriefItem icon="calendar_today" title={nextEvents.length ? `${nextEvents.length} komende afspraken` : "Agenda: geen afspraken"} detail={nextEvents[0] ? `${formatClock(nextEvents[0].starts_at)} · ${nextEvents[0].summary}` : calendarLabel(schedule.status)} tone="secondary" />
                 <BriefItem icon="notifications" title={openCards.length ? `${openCards.length} open signalen` : "Geen open signalen"} detail={openCards[0]?.next_safe_step ?? "Geen open statuskaart bekend."} tone="tertiary" />
               </div>
@@ -92,12 +107,12 @@ export default async function TodayPage() {
             </CortexPanel>
 
             <CortexPanel className="p-space-base xl:p-space-lg">
-              <PanelHeader icon="psychology" title="Stream Dock & Inname" detail="READ-ONLY" />
+              <PanelHeader icon="psychology" title="Stream Dock & Inname" detail={streamDock?.state.toUpperCase() ?? "UNKNOWN"} />
               <div className="mt-space-base rounded-lg bg-surface-container-low p-space-sm">
                 <label className="font-label-caps text-label-caps text-outline" htmlFor="stream-dock">Snelle capture</label>
-                <div className="mt-space-xs flex gap-space-sm"><input className="m-0 min-w-0 border-surface-container-highest bg-surface-container-lowest font-body text-body-sm text-outline disabled:cursor-not-allowed" disabled id="stream-dock" placeholder="Stream Dock komt in een volgende fase beschikbaar" /><span className="flex shrink-0 items-center rounded bg-surface-container-high px-space-sm font-mono text-mono-data-sm text-outline" aria-label="Niet beschikbaar">Ingest</span></div>
+                <div className="mt-space-xs flex gap-space-sm"><input className="m-0 min-w-0 border-surface-container-highest bg-surface-container-lowest font-body text-body-sm text-outline disabled:cursor-not-allowed" disabled id="stream-dock" placeholder="Gebruik een gekoppeld apparaat voor capture" /><span className="flex shrink-0 items-center rounded bg-surface-container-high px-space-sm font-mono text-mono-data-sm text-outline" aria-label="Gekoppeld apparaat vereist">Ingest</span></div>
               </div>
-              <div className="mt-space-base border-t border-surface-container-highest pt-space-sm"><p className="font-label-caps text-label-caps text-outline">Stream status</p><p className="mt-space-xs text-body-sm text-on-surface-variant">Geen Stream Dock-items beschikbaar. Deze shell voert geen mutaties uit.</p></div>
+              <div className="mt-space-base border-t border-surface-container-highest pt-space-sm"><p className="font-label-caps text-label-caps text-outline">Stream status</p><p className="mt-space-xs text-body-sm text-on-surface-variant">{streamDock?.reason ?? "Unknown: Cortex-data niet beschikbaar."}</p></div>
             </CortexPanel>
           </div>
 
