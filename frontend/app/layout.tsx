@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import "./globals.css";
 import { Navigation } from "./navigation";
 
@@ -29,7 +30,7 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
         <div className="cortex-root">
           <aside className="border-b border-surface-container-highest bg-surface-container-lowest px-space-base py-space-sm md:fixed md:inset-y-0 md:left-0 md:z-50 md:flex md:w-16 md:flex-col md:border-b-0 md:border-r md:px-space-sm lg:w-sidebar-width lg:px-space-base">
             <div className="flex h-12 items-center gap-space-sm lg:h-16">
-              <div className="grid h-8 w-8 place-items-center rounded border border-primary/35 bg-primary/10 text-primary"><span className="material-symbols-outlined text-[18px]" aria-hidden="true">neurology</span></div>
+              <div className="grid h-8 w-8 place-items-center overflow-hidden rounded border border-primary/35 bg-primary/10"><Image alt="Cortex Command" height={32} priority src="/cortex-command-logo.svg" width={32} /></div>
               <div className="hidden min-w-0 lg:block"><p className="font-headline text-headline-sm uppercase tracking-tight text-on-surface">Cortex // Command</p><p className="mt-0.5 flex items-center gap-1 font-mono text-mono-data-sm text-tertiary"><span className="h-1.5 w-1.5 rounded-full bg-tertiary shadow-[0_0_8px_rgba(78,222,163,0.8)]" />Control Center</p></div>
             </div>
             <Navigation />
