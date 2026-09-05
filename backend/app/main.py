@@ -9,14 +9,14 @@ import hmac
 import json
 import os
 import secrets
-from typing import Any
+from typing import Any, Literal
 from urllib.error import URLError
 from urllib.request import Request as UrlRequest, urlopen
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import psycopg
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import BackgroundTasks, Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -625,6 +625,30 @@ class PairingExchangeResponse(BaseModel):
     device: DeviceStatus
 
 
+class BrowserSessionPairResponse(BaseModel):
+    device: DeviceStatus
+    expires_at: datetime
+
+
+class BrowserStreamEntryRead(BaseModel):
+    id: str
+    kind: StreamEntryKind
+    status: StreamEntryStatus
+    title: str
+    summary: str | None
+    created_at: datetime
+    updated_at: datetime
+    archived: bool
+    deleted: bool
+
+
+class BrowserStreamEntriesResponse(BaseModel):
+    entries: list[BrowserStreamEntryRead]
+    page: int
+    limit: int
+    has_more: bool
+
+
 class DeviceListResponse(BaseModel):
     devices: list[DeviceStatus]
 
@@ -908,6 +932,9 @@ PAIRING_CODE_TTL = timedelta(minutes=10)
 PAIRING_RATE_LIMIT = 5
 PAIRING_RATE_WINDOW = timedelta(minutes=10)
 LAST_SEEN_UPDATE_INTERVAL = timedelta(minutes=5)
+BROWSER_SESSION_TTL = timedelta(hours=8)
+BROWSER_SESSION_COOKIE = "cortex_browser_session"
+MAX_BROWSER_STREAM_PAGE_SIZE = 50
 HEALTH_SYNC_MAX_PAYLOAD_BYTES = 1_048_576
 
 
@@ -979,6 +1006,64 @@ def require_paired_device(authorization: str | None, connection: psycopg.Connect
     return device
 
 
+def browser_session_unauthorized(state: Literal["invalid", "expired", "revoked"]) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Browser session {state}")
+
+
+def create_browser_session(device_id: str, connection: psycopg.Connection) -> tuple[str, datetime]:
+    session_token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(UTC) + BROWSER_SESSION_TTL
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO browser_sessions (id, device_id, token_hash, expires_at)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (str(uuid4()), device_id, secret_hash(session_token), expires_at),
+        )
+    return session_token, expires_at
+
+
+def require_browser_session(session_token: str | None, connection: psycopg.Connection) -> dict:
+    if not session_token or len(session_token) > 512:
+        raise browser_session_unauthorized("invalid")
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT browser_sessions.id AS session_id, browser_sessions.device_id, browser_sessions.expires_at,
+                   browser_sessions.revoked_at AS session_revoked_at, paired_devices.revoked_at AS device_revoked_at
+            FROM browser_sessions
+            JOIN paired_devices ON paired_devices.id = browser_sessions.device_id
+            WHERE browser_sessions.token_hash = %s
+            """,
+            (secret_hash(session_token),),
+        )
+        session = cursor.fetchone()
+        if session is None:
+            raise browser_session_unauthorized("invalid")
+        if session["session_revoked_at"] is not None or session["device_revoked_at"] is not None:
+            raise browser_session_unauthorized("revoked")
+        if session["expires_at"] <= datetime.now(UTC):
+            raise browser_session_unauthorized("expired")
+        cursor.execute(
+            """
+            UPDATE browser_sessions SET last_seen_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+              AND (last_seen_at IS NULL OR last_seen_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes')
+            """,
+            (session["session_id"],),
+        )
+    return {"id": session["device_id"], "session_id": session["session_id"]}
+
+
+def revoke_browser_session(session_id: str, connection: psycopg.Connection) -> None:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE browser_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE id = %s AND revoked_at IS NULL",
+            (session_id,),
+        )
+
+
 def create_pairing_challenge(connection: psycopg.Connection, device_name: str) -> dict:
     pairing_code = secrets.token_urlsafe(32)
     expires_at = datetime.now(UTC) + PAIRING_CODE_TTL
@@ -1025,6 +1110,20 @@ def record_pairing_failure(cursor: psycopg.Cursor, pairing_code_hash: str, clien
 def get_connection() -> Generator[psycopg.Connection, None, None]:
     with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as connection:
         yield connection
+
+
+def require_browser_session_dependency(
+    cortex_browser_session: str | None = Cookie(default=None),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    return require_browser_session(cortex_browser_session, connection)
+
+
+def require_device_stream_owner(
+    authorization: str | None = Header(default=None),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    return require_paired_device(authorization, connection)
 
 
 def run_migrations() -> None:
@@ -1262,6 +1361,23 @@ def run_migrations() -> None:
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS browser_sessions (
+                    id TEXT PRIMARY KEY,
+                    device_id TEXT NOT NULL REFERENCES paired_devices(id),
+                    token_hash TEXT NOT NULL UNIQUE,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    last_seen_at TIMESTAMPTZ,
+                    revoked_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS browser_sessions_active_token_idx "
+                "ON browser_sessions (token_hash) WHERE revoked_at IS NULL"
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS health_weights (
                     id TEXT PRIMARY KEY,
                     measured_at TIMESTAMPTZ NOT NULL,
@@ -1492,6 +1608,42 @@ def exchange_pairing_challenge(
             (pairing_code_hash, client_ip_hash),
         )
     return {"device_token": device_token, "device": device}
+
+
+@app.post(
+    "/api/browser-sessions/pair",
+    status_code=status.HTTP_201_CREATED,
+    response_model=BrowserSessionPairResponse,
+)
+def pair_browser_session(
+    payload: PairingExchangeRequest,
+    request: Request,
+    response: Response,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    pairing = exchange_pairing_challenge(payload, request, connection)
+    session_token, expires_at = create_browser_session(pairing["device"]["id"], connection)
+    response.set_cookie(
+        key=BROWSER_SESSION_COOKIE,
+        value=session_token,
+        max_age=int(BROWSER_SESSION_TTL.total_seconds()),
+        expires=expires_at,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="strict",
+    )
+    return {"device": pairing["device"], "expires_at": expires_at}
+
+
+@app.delete("/api/browser-sessions/current", status_code=status.HTTP_204_NO_CONTENT)
+def logout_browser_session(
+    response: Response,
+    session: dict = Depends(require_browser_session_dependency),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> None:
+    revoke_browser_session(session["session_id"], connection)
+    response.delete_cookie(BROWSER_SESSION_COOKIE, path="/", secure=True, httponly=True, samesite="strict")
 
 
 @app.get("/api/devices/me", response_model=DeviceStatus)
@@ -2698,6 +2850,60 @@ def list_stream_entries(
         return cursor.fetchall()
 
 
+def browser_stream_entry_read(entry: dict) -> dict:
+    content = entry["content"]
+    return {
+        "id": entry["id"],
+        "kind": entry["kind"],
+        "status": entry["status"],
+        "title": content[:120] if content else "Spraakreferentie",
+        "summary": content,
+        "created_at": entry["created_at"],
+        "updated_at": entry["updated_at"],
+        "archived": entry["status"] == StreamEntryStatus.ARCHIVED.value,
+        "deleted": entry["status"] == StreamEntryStatus.DELETED.value,
+    }
+
+
+def list_browser_stream_entries(
+    owner_id: str,
+    connection: psycopg.Connection,
+    entry_status: StreamEntryStatus | None,
+    entry_kind: StreamEntryKind | None,
+    view: Literal["inbox", "archive", "all"],
+    page: int,
+    limit: int,
+) -> dict:
+    clauses = ["owner_id = %s"]
+    values: list[Any] = [owner_id]
+    if entry_status is not None:
+        clauses.append("status = %s")
+        values.append(entry_status.value)
+    elif view == "inbox":
+        clauses.append("status IN ('captured', 'triaged')")
+    elif view == "archive":
+        clauses.append("status = 'archived'")
+    else:
+        clauses.append("status != 'deleted'")
+    if entry_kind is not None:
+        clauses.append("kind = %s")
+        values.append(entry_kind.value)
+    values.extend([limit + 1, (page - 1) * limit])
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"SELECT {STREAM_ENTRY_COLUMNS} FROM stream_entries WHERE {' AND '.join(clauses)} "
+            "ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            values,
+        )
+        entries = cursor.fetchall()
+    return {
+        "entries": [browser_stream_entry_read(entry) for entry in entries[:limit]],
+        "page": page,
+        "limit": limit,
+        "has_more": len(entries) > limit,
+    }
+
+
 def change_stream_entry_status(
     entry_id: str, owner_id: str, next_status: StreamEntryStatus, connection: psycopg.Connection
 ) -> dict:
@@ -2839,9 +3045,26 @@ def request_coprocessor_proposal(
 
 
 def require_stream_owner(
-    authorization: str | None = Header(default=None), connection: psycopg.Connection = Depends(get_connection)
+    authorization: str | None = Header(default=None),
+    cortex_browser_session: str | None = Cookie(default=None),
+    connection: psycopg.Connection = Depends(get_connection),
 ) -> dict:
-    return require_paired_device(authorization, connection)
+    if authorization is not None:
+        return require_paired_device(authorization, connection)
+    return require_browser_session(cortex_browser_session, connection)
+
+
+@app.get("/api/browser/stream-entries", response_model=BrowserStreamEntriesResponse)
+def get_browser_stream_entries(
+    entry_status: StreamEntryStatus | None = Query(default=None, alias="status"),
+    entry_kind: StreamEntryKind | None = Query(default=None, alias="kind"),
+    view: Literal["inbox", "archive", "all"] = Query(default="inbox"),
+    page: int = Query(default=1, ge=1, le=10_000),
+    limit: int = Query(default=25, ge=1, le=MAX_BROWSER_STREAM_PAGE_SIZE),
+    session: dict = Depends(require_browser_session_dependency),
+    connection: psycopg.Connection = Depends(get_connection),
+) -> dict:
+    return list_browser_stream_entries(session["id"], connection, entry_status, entry_kind, view, page, limit)
 
 
 @app.post("/api/stream-entries", status_code=status.HTTP_201_CREATED)
@@ -2856,7 +3079,7 @@ def post_stream_entry(
 @app.get("/api/stream-entries")
 def get_stream_entries(
     entry_status: StreamEntryStatus | None = Query(default=None, alias="status"),
-    device: dict = Depends(require_stream_owner),
+    device: dict = Depends(require_device_stream_owner),
     connection: psycopg.Connection = Depends(get_connection),
 ) -> list[dict]:
     return list_stream_entries(device["id"], connection, entry_status)
