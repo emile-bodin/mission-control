@@ -35,6 +35,7 @@ test("Second Brain keeps paired stream entry flows and marks knowledge processin
   assert.match(page, /Raw Ingestion Stream/);
   assert.match(page, /Processing matrix/);
   assert.match(page, /\/api\/browser-sessions\/pair/);
+  assert.match(page, /Gebruiker koppelen/);
   assert.match(page, /\/api\/stream-entries\/\$\{entry\.id\}\/triage/);
   assert.match(page, /UNAVAILABLE BY SOURCE/);
 });

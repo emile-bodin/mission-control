@@ -51,7 +51,7 @@ class StreamEntryValidationTests(unittest.TestCase):
             StreamEntryInput(kind=StreamEntryKind.TEXT, content="note", source_metadata={"api_token": "secret"})
 
     @patch("app.main.create_browser_session", return_value=("session-secret", datetime(2030, 1, 1, tzinfo=UTC)))
-    @patch("app.main.exchange_pairing_challenge", return_value={"device_token": "never-returned", "device": {"id": "device-1", "device_name": "Browser", "paired_at": datetime(2026, 1, 1, tzinfo=UTC), "last_seen_at": None, "revoked_at": None}})
+    @patch("app.main.exchange_pairing_challenge", return_value={"device_token": "never-returned", "device": {"id": "device-1", "owner_id": "default-user", "device_name": "Browser", "paired_at": datetime(2026, 1, 1, tzinfo=UTC), "last_seen_at": None, "revoked_at": None}})
     def test_browser_pair_sets_secure_opaque_cookie(self, _exchange, _session):
         response = Response()
         result = pair_browser_session(PairingExchangeRequest(pairing_code="code"), object(), response, object())
@@ -90,16 +90,17 @@ class CortexTests(unittest.TestCase):
     def connection(self):
         return psycopg.connect(TEST_DATABASE_URL, row_factory=dict_row)
 
-    def browser_session(self, connection) -> tuple[str, str]:
-        owner_id = f"hyd-201-device-{uuid4()}"
-        self.browser_owner_ids.append(owner_id)
+    def browser_session(self, connection, owner_id: str | None = None) -> tuple[str, str]:
+        device_id = f"hyd-201-device-{uuid4()}"
+        self.browser_owner_ids.append(device_id)
+        owner_id = owner_id or device_id
         with connection.cursor() as cursor:
             cursor.execute(
-                "INSERT INTO paired_devices (id, device_name, token_hash) VALUES (%s, %s, %s)",
-                (owner_id, "browser-test", secret_hash(str(uuid4()))),
+                "INSERT INTO paired_devices (id, owner_id, device_name, token_hash) VALUES (%s, %s, %s, %s)",
+                (device_id, owner_id, "browser-test", secret_hash(str(uuid4()))),
             )
-        token, _ = create_browser_session(owner_id, connection)
-        return owner_id, token
+        token, _ = create_browser_session(device_id, connection)
+        return device_id, token
 
     def test_migration_is_idempotent(self):
         run_migrations()
@@ -127,34 +128,35 @@ class CortexTests(unittest.TestCase):
 
     def test_browser_sessions_are_owner_bound_bounded_and_revocable(self):
         with self.connection() as connection:
-            owner_id, token = self.browser_session(connection)
-            other_owner_id, other_token = self.browser_session(connection)
-            entry = create_stream_entry(StreamEntryInput(kind=StreamEntryKind.TEXT, content="Private note"), owner_id, connection)
-            other_entry = create_stream_entry(StreamEntryInput(kind=StreamEntryKind.TEXT, content="Other note"), other_owner_id, connection)
+            owner_device_id, token = self.browser_session(connection, self.owner_id)
+            _, other_token = self.browser_session(connection, self.other_owner_id)
+            entry = create_stream_entry(StreamEntryInput(kind=StreamEntryKind.TEXT, content="Private note"), self.owner_id, connection)
+            other_entry = create_stream_entry(StreamEntryInput(kind=StreamEntryKind.TEXT, content="Other note"), self.other_owner_id, connection)
             session = require_browser_session(token, connection)
-            self.assertEqual(session["id"], owner_id)
-            self.assertEqual(require_stream_owner(None, token, connection)["id"], owner_id)
+            self.assertEqual(session["id"], owner_device_id)
+            self.assertEqual(session["owner_id"], self.owner_id)
+            self.assertEqual(require_stream_owner(None, token, connection)["id"], self.owner_id)
             with self.assertRaises(HTTPException) as raw_read:
                 require_device_stream_owner(None, connection)
             self.assertEqual(raw_read.exception.status_code, 401)
-            read_model = list_browser_stream_entries(owner_id, connection, None, None, "all", 1, 1)
+            read_model = list_browser_stream_entries(self.owner_id, connection, None, None, "all", 1, 1)
             self.assertEqual([item["id"] for item in read_model["entries"]], [entry["id"]])
             self.assertEqual(set(read_model["entries"][0]), {"id", "kind", "status", "title", "summary", "created_at", "updated_at", "archived", "deleted"})
             self.assertTrue(read_model["entries"][0]["summary"] == "Private note")
             self.assertFalse(read_model["has_more"])
             with self.assertRaises(HTTPException) as cross_owner_read:
-                get_stream_entry(entry["id"], require_browser_session(other_token, connection)["id"], connection)
+                get_stream_entry(entry["id"], require_browser_session(other_token, connection)["owner_id"], connection)
             self.assertEqual(cross_owner_read.exception.status_code, 404)
             with self.assertRaises(HTTPException) as cross_owner_mutation:
-                change_stream_entry_status(other_entry["id"], owner_id, StreamEntryStatus.ARCHIVED, connection)
+                change_stream_entry_status(other_entry["id"], self.owner_id, StreamEntryStatus.ARCHIVED, connection)
             self.assertEqual(cross_owner_mutation.exception.status_code, 404)
             for index in range(2):
-                create_stream_entry(StreamEntryInput(kind=StreamEntryKind.TEXT, content=f"More {index}"), owner_id, connection)
-            page = list_browser_stream_entries(owner_id, connection, None, None, "all", 1, 2)
+                create_stream_entry(StreamEntryInput(kind=StreamEntryKind.TEXT, content=f"More {index}"), self.owner_id, connection)
+            page = list_browser_stream_entries(self.owner_id, connection, None, None, "all", 1, 2)
             self.assertEqual(len(page["entries"]), 2)
             self.assertTrue(page["has_more"])
             self.assertEqual(MAX_BROWSER_STREAM_PAGE_SIZE, 50)
-            replacement_token, _ = create_browser_session(owner_id, connection)
+            replacement_token, _ = create_browser_session(owner_device_id, connection)
             self.assertNotEqual(token, replacement_token)
             with connection.cursor() as cursor:
                 cursor.execute("UPDATE browser_sessions SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE token_hash = %s", (secret_hash(token),))

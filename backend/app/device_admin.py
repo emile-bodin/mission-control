@@ -13,6 +13,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     challenge = commands.add_parser("create-challenge")
     challenge.add_argument("device_name")
+    challenge.add_argument("--owner-id", default="default-user")
     commands.add_parser("list")
     revoke = commands.add_parser("revoke")
     revoke.add_argument("device_id")
@@ -22,11 +23,11 @@ def main() -> None:
     run_migrations()
     with psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row) as connection:
         if args.command == "create-challenge":
-            print(json.dumps(create_pairing_challenge(connection, args.device_name), default=str))
+            print(json.dumps(create_pairing_challenge(connection, args.device_name, args.owner_id), default=str))
         elif args.command == "list":
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT id, device_name, paired_at, last_seen_at, revoked_at FROM paired_devices ORDER BY paired_at DESC"
+                    "SELECT id, owner_id, device_name, paired_at, last_seen_at, revoked_at FROM paired_devices ORDER BY paired_at DESC"
                 )
                 print(json.dumps({"devices": cursor.fetchall()}, default=str))
         else:

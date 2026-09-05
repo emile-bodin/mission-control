@@ -28,6 +28,7 @@ class DevicePairingTests(unittest.TestCase):
 
     def setUp(self):
         self.device_name = f"pairing-test-{uuid4()}"
+        self.owner_id = f"owner-{uuid4()}"
         self.pairing_hashes: list[str] = []
         self.admin_headers = {"X-Device-Admin-Token": os.environ["DEVICE_ADMIN_TOKEN"]}
 
@@ -55,7 +56,7 @@ class DevicePairingTests(unittest.TestCase):
 
     def create_challenge(self) -> str:
         status, response = self.request(
-            "POST", "/api/devices/pairing-challenges", {"device_name": self.device_name}, self.admin_headers
+            "POST", "/api/devices/pairing-challenges", {"device_name": self.device_name, "owner_id": self.owner_id}, self.admin_headers
         )
         self.assertEqual(status, 201)
         self.pairing_hashes.append(secret_hash(response["pairing_code"]))
@@ -71,14 +72,15 @@ class DevicePairingTests(unittest.TestCase):
         device_token = body["device_token"]
         self.assertNotIn("token_hash", body)
         self.assertNotIn(pairing_code, str(body["device"]))
+        self.assertEqual(body["device"]["owner_id"], self.owner_id)
         run_migrations()
 
         with psycopg.connect(TEST_DATABASE_URL) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT pairing_code_hash FROM pairing_challenges")
                 self.assertEqual(cursor.fetchone()[0], secret_hash(pairing_code))
-                cursor.execute("SELECT token_hash FROM paired_devices")
-                self.assertEqual(cursor.fetchone()[0], secret_hash(device_token))
+                cursor.execute("SELECT token_hash, owner_id FROM paired_devices")
+                self.assertEqual(cursor.fetchone(), (secret_hash(device_token), self.owner_id))
 
         status, status_response = self.request("GET", "/api/devices/me", headers={"Authorization": f"Bearer {device_token}"})
         self.assertEqual(status, 200)

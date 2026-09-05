@@ -599,6 +599,7 @@ class PairingChallengeCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     device_name: str = Field(min_length=1, max_length=120)
+    owner_id: str = Field(default="default-user", min_length=1, max_length=120)
 
 
 class PairingChallengeResponse(BaseModel):
@@ -614,6 +615,7 @@ class PairingExchangeRequest(BaseModel):
 
 class DeviceStatus(BaseModel):
     id: str
+    owner_id: str
     device_name: str
     paired_at: datetime
     last_seen_at: datetime | None
@@ -934,6 +936,7 @@ PAIRING_RATE_WINDOW = timedelta(minutes=10)
 LAST_SEEN_UPDATE_INTERVAL = timedelta(minutes=5)
 BROWSER_SESSION_TTL = timedelta(hours=8)
 BROWSER_SESSION_COOKIE = "cortex_browser_session"
+DEFAULT_OWNER_ID = "default-user"
 MAX_BROWSER_STREAM_PAGE_SIZE = 50
 HEALTH_SYNC_MAX_PAYLOAD_BYTES = 1_048_576
 
@@ -985,7 +988,7 @@ def require_paired_device(authorization: str | None, connection: psycopg.Connect
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, device_name, paired_at, last_seen_at, revoked_at
+            SELECT id, owner_id, device_name, paired_at, last_seen_at, revoked_at
             FROM paired_devices
             WHERE token_hash = %s AND revoked_at IS NULL
             """,
@@ -1030,8 +1033,9 @@ def require_browser_session(session_token: str | None, connection: psycopg.Conne
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT browser_sessions.id AS session_id, browser_sessions.device_id, browser_sessions.expires_at,
-                   browser_sessions.revoked_at AS session_revoked_at, paired_devices.revoked_at AS device_revoked_at
+            SELECT browser_sessions.id AS session_id, browser_sessions.device_id, paired_devices.owner_id,
+                   browser_sessions.expires_at, browser_sessions.revoked_at AS session_revoked_at,
+                   paired_devices.revoked_at AS device_revoked_at
             FROM browser_sessions
             JOIN paired_devices ON paired_devices.id = browser_sessions.device_id
             WHERE browser_sessions.token_hash = %s
@@ -1053,7 +1057,7 @@ def require_browser_session(session_token: str | None, connection: psycopg.Conne
             """,
             (session["session_id"],),
         )
-    return {"id": session["device_id"], "session_id": session["session_id"]}
+    return {"id": session["device_id"], "owner_id": session["owner_id"], "session_id": session["session_id"]}
 
 
 def revoke_browser_session(session_id: str, connection: psycopg.Connection) -> None:
@@ -1064,16 +1068,16 @@ def revoke_browser_session(session_id: str, connection: psycopg.Connection) -> N
         )
 
 
-def create_pairing_challenge(connection: psycopg.Connection, device_name: str) -> dict:
+def create_pairing_challenge(connection: psycopg.Connection, device_name: str, owner_id: str = DEFAULT_OWNER_ID) -> dict:
     pairing_code = secrets.token_urlsafe(32)
     expires_at = datetime.now(UTC) + PAIRING_CODE_TTL
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            INSERT INTO pairing_challenges (id, pairing_code_hash, device_name, expires_at)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO pairing_challenges (id, pairing_code_hash, owner_id, device_name, expires_at)
+            VALUES (%s, %s, %s, %s, %s)
             """,
-            (str(uuid4()), secret_hash(pairing_code), device_name, expires_at),
+            (str(uuid4()), secret_hash(pairing_code), owner_id, device_name, expires_at),
         )
     return {"pairing_code": pairing_code, "expires_at": expires_at}
 
@@ -1123,7 +1127,8 @@ def require_device_stream_owner(
     authorization: str | None = Header(default=None),
     connection: psycopg.Connection = Depends(get_connection),
 ) -> dict:
-    return require_paired_device(authorization, connection)
+    device = require_paired_device(authorization, connection)
+    return {**device, "id": device["owner_id"]}
 
 
 def run_migrations() -> None:
@@ -1321,6 +1326,7 @@ def run_migrations() -> None:
                 CREATE TABLE IF NOT EXISTS pairing_challenges (
                     id TEXT PRIMARY KEY,
                     pairing_code_hash TEXT NOT NULL UNIQUE,
+                    owner_id TEXT NOT NULL DEFAULT 'default-user',
                     device_name TEXT NOT NULL,
                     expires_at TIMESTAMPTZ NOT NULL,
                     used_at TIMESTAMPTZ,
@@ -1332,12 +1338,31 @@ def run_migrations() -> None:
                 """
                 CREATE TABLE IF NOT EXISTS paired_devices (
                     id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL DEFAULT 'default-user',
                     device_name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
                     paired_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_seen_at TIMESTAMPTZ,
                     revoked_at TIMESTAMPTZ
                 )
+                """
+            )
+            cursor.execute("ALTER TABLE pairing_challenges ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'default-user'")
+            cursor.execute("ALTER TABLE paired_devices ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'default-user'")
+            cursor.execute(
+                """
+                UPDATE stream_entries AS entries
+                SET owner_id = devices.owner_id
+                FROM paired_devices AS devices
+                WHERE entries.owner_id = devices.id
+                """
+            )
+            cursor.execute(
+                """
+                UPDATE stream_entry_audits AS audits
+                SET owner_id = devices.owner_id
+                FROM paired_devices AS devices
+                WHERE audits.owner_id = devices.id
                 """
             )
             cursor.execute(
@@ -1548,7 +1573,7 @@ def create_device_pairing_challenge(
     _: None = Depends(require_admin_token),
     connection: psycopg.Connection = Depends(get_connection),
 ) -> dict:
-    return create_pairing_challenge(connection, payload.device_name)
+    return create_pairing_challenge(connection, payload.device_name, payload.owner_id)
 
 
 @app.post(
@@ -1580,7 +1605,7 @@ def exchange_pairing_challenge(
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Pairing unavailable")
 
         cursor.execute(
-            "SELECT id, device_name, expires_at, used_at FROM pairing_challenges WHERE pairing_code_hash = %s FOR UPDATE",
+            "SELECT id, owner_id, device_name, expires_at, used_at FROM pairing_challenges WHERE pairing_code_hash = %s FOR UPDATE",
             (pairing_code_hash,),
         )
         challenge = cursor.fetchone()
@@ -1596,11 +1621,11 @@ def exchange_pairing_challenge(
         cursor.execute("UPDATE pairing_challenges SET used_at = CURRENT_TIMESTAMP WHERE id = %s", (challenge["id"],))
         cursor.execute(
             """
-            INSERT INTO paired_devices (id, device_name, token_hash, last_seen_at)
-            VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-            RETURNING id, device_name, paired_at, last_seen_at, revoked_at
+            INSERT INTO paired_devices (id, owner_id, device_name, token_hash, last_seen_at)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+            RETURNING id, owner_id, device_name, paired_at, last_seen_at, revoked_at
             """,
-            (device_id, challenge["device_name"], secret_hash(device_token)),
+            (device_id, challenge["owner_id"], challenge["device_name"], secret_hash(device_token)),
         )
         device = cursor.fetchone()
         cursor.execute(
@@ -1662,7 +1687,7 @@ def list_devices(
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, device_name, paired_at, last_seen_at, revoked_at
+            SELECT id, owner_id, device_name, paired_at, last_seen_at, revoked_at
             FROM paired_devices
             ORDER BY paired_at DESC
             """
@@ -3050,8 +3075,9 @@ def require_stream_owner(
     connection: psycopg.Connection = Depends(get_connection),
 ) -> dict:
     if authorization is not None:
-        return require_paired_device(authorization, connection)
-    return require_browser_session(cortex_browser_session, connection)
+        return require_device_stream_owner(authorization, connection)
+    session = require_browser_session(cortex_browser_session, connection)
+    return {**session, "id": session["owner_id"]}
 
 
 @app.get("/api/browser/stream-entries", response_model=BrowserStreamEntriesResponse)
@@ -3064,7 +3090,7 @@ def get_browser_stream_entries(
     session: dict = Depends(require_browser_session_dependency),
     connection: psycopg.Connection = Depends(get_connection),
 ) -> dict:
-    return list_browser_stream_entries(session["id"], connection, entry_status, entry_kind, view, page, limit)
+    return list_browser_stream_entries(session["owner_id"], connection, entry_status, entry_kind, view, page, limit)
 
 
 @app.post("/api/stream-entries", status_code=status.HTTP_201_CREATED)

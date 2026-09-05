@@ -18,7 +18,7 @@ Screen-id: `fa736b2bc0c64b8ca89e8f7e7505421d`.
 | Cluster telemetry strip | Pulse-context naast workspace | Pulse resources | `/api/cortex/today.homelab` | partial | Behoud apart paneel; onbekende metriek blijft Unknown. |
 | Chrono Stream | Tijdlijn met context en detailroute | agenda, routines, acties | `/api/cortex/today.chrono`, actions | partial | Behoud tijd/type/context; alleen veilige links, geen Auto-Block. |
 | Bio-Vitals & Recovery | Losse categoriekaarten | activiteit, gewicht; overige health-bronnen | `/api/cortex/today.health` | partial | Activity/gewicht binden; sleep, steps, recovery en fasting expliciet unavailable. |
-| Stream Dock & Ingestion | Entry naar Second Brain | browser session + `stream_entries` | `/ideas`, HYD-201 API | partial | Werkende link en capability-state, geen disabled placeholder. |
+| Stream Dock & Ingestion | Entry naar Second Brain | user session + `stream_entries` | `/ideas`, HYD-201 API | partial | Werkende link en capability-state, geen disabled placeholder. |
 | Coprocessor / inspector | Proposal-only vraag en resultaat | Cortex proposal capability | `CortexCoprocessor`, `/api/cortex/coprocessor*` | matched | Behoud gescheiden voorstelstroom; geen execute/apply. |
 
 ## `/briefings` — Executive Daily Briefing
@@ -41,7 +41,7 @@ Screen-id: `bb4c8d68c24c4d18b8ff19dd274a7a3b`.
 | Stitch sectie/paneel | Doel en plaats | Vereiste data | Huidige Mission Control component / API | Status | Correctie |
 | --- | --- | --- | --- | --- | --- |
 | Capture dock | Nieuwe capture/type bovenaan | paired browser session | `IdeasClient`, `POST /api/stream-entries` | partial | Houd capturevorm prominent en noem alleen bestaande typen. |
-| Pairing/auth state | Toegang vóór inhoud | HYD-201 browser-session | `/api/browser-sessions/pair` | matched | Behoud state en foutfeedback. |
+| Pairing/auth state | Toegang vóór inhoud | HYD-201 user-session | `/api/browser-sessions/pair` | matched | Pairing challenge carries stable `owner_id`; browsers/devices share user inbox. |
 | Inbox/raw stream | Binnengekomen entries links | `stream_entries` | `/api/browser/stream-entries` | partial | Behoud cardgroep met type/status/tijd/action. |
 | Tabs/filters | Inbox, archive, all, type/status | `stream_entries` | `IdeasClient` query params | matched | Geen wijziging nodig. |
 | Triage/processing | Veilige triage-status en actie | `stream_entries` | `/triage` | partial | Gebruik echte captured/triaged state; geen AI-structurering. |
@@ -80,7 +80,7 @@ Screen-id: `fcabbedcf2874d47af933f92740f7b4b`.
 
 - `/api/cortex/today`: briefing, projecten, statuskaarten, acties, agenda/routine-context, Pulse-samenvatting, gewicht en activiteiten.
 - `/api/briefings` en `/api/briefing-proposals`: feiten, onbekenden en proposal-only review.
-- HYD-201 browser-session en `stream_entries`: capture, list, triage, archive en pairing.
+- HYD-201 user-session en `stream_entries`: capture, list, triage, archive en pairing. Pairing is owner-bound, niet browser-bound.
 - `/api/homelab`: read-only Pulse resource facts. `/api/assets`: handmatige asset-flow.
 - `/api/projects`: lokale projectregistry en detailroutes.
 
