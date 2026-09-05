@@ -6,5 +6,5 @@ type CortexPanelProps = Readonly<{
 }>;
 
 export function CortexPanel({ children, className = "" }: CortexPanelProps) {
-  return <section className={`cortex-panel rounded-xl ${className}`}>{children}</section>;
+  return <section className={`cortex-panel rounded-md border border-surface-container-highest ${className}`}>{children}</section>;
 }

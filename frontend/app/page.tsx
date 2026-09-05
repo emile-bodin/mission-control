@@ -62,20 +62,7 @@ export default async function TodayPage() {
   const dataAvailable = schedule.status === "Beschikbaar" || homelab.available || Boolean(latestWeight || latestActivity);
 
   return (
-    <>
-      <header className="sticky top-0 z-40 flex h-16 items-center justify-between gap-space-base border-b border-surface-container-high bg-surface-container-lowest/80 px-space-base backdrop-blur-xl md:fixed md:left-16 md:right-0 lg:left-sidebar-width" aria-label="Cortex Command topbar">
-        <div className="flex min-w-0 items-center gap-space-sm">
-          <span className="material-symbols-outlined text-primary" aria-hidden="true">neurology</span>
-          <div className="min-w-0"><p className="truncate font-headline text-headline-sm uppercase tracking-tight text-on-surface">Cortex // Command</p><p className="hidden font-mono text-mono-data-sm text-tertiary sm:block">Bodin Control Center</p></div>
-        </div>
-        <Link className="cortex-focus hidden max-w-command-bar-max-width flex-1 items-center justify-between rounded-xl bg-surface-container px-space-md py-space-xs shadow-[inset_0_0_0_1px_#2e3545] sm:flex" href="/ideas" aria-label="Open Second Brain capture">
-          <span className="flex min-w-0 items-center gap-space-sm text-on-surface-variant"><span className="material-symbols-outlined text-[18px] text-primary" aria-hidden="true">auto_awesome</span><span className="truncate text-body-sm">Zoek of start een actie…</span></span>
-          <kbd className="rounded bg-surface-container-lowest px-space-xs py-space-2xs font-mono text-mono-data-sm text-outline">⌘K</kbd>
-        </Link>
-        <div className="flex items-center gap-space-sm"><span className="hidden font-mono text-mono-data-sm text-outline md:block">Europe/Amsterdam</span><Link className="cortex-focus grid h-8 w-8 place-items-center rounded-full bg-surface-bright font-mono text-mono-data-sm text-on-surface" href="/">EB</Link></div>
-      </header>
-
-      <main className="mx-auto max-w-[1600px] px-margin-mobile py-space-lg md:px-margin-desktop md:pb-space-3xl md:pt-24" aria-label="Vandaag">
+    <main className="mx-auto max-w-[1600px] px-margin-mobile py-space-lg md:px-margin-desktop md:pb-space-3xl" aria-label="Vandaag">
         <section className="relative overflow-hidden rounded-xl border border-surface-container-high bg-surface-container p-space-base shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] xl:p-space-lg" aria-labelledby="daily-brief-title">
           <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-[radial-gradient(ellipse_at_top_left,rgba(76,215,246,0.16),transparent_55%)]" aria-hidden="true" />
           <div className="relative flex flex-col gap-space-lg xl:flex-row xl:items-stretch">
@@ -127,9 +114,8 @@ export default async function TodayPage() {
               <PanelHeader icon="monitor_heart" title="Health & herstel" detail={latestWeight || latestActivity ? "BESCHIKBAAR" : "UNKNOWN"} />
               <div className="mt-space-base grid gap-space-sm sm:grid-cols-2">
                 <MetricCard label="Stappen" value="Unknown" detail="Geen stappenbron" ring />
-                <MetricCard label="Activiteit" value={latestActivity ? formatDuration(latestActivity.duration_seconds) : "Unknown"} detail={latestActivity?.activity_type ?? "Geen syncdata"} icon="directions_run" />
+                <MetricCard label="Activiteit & herstel" value={latestActivity ? formatDuration(latestActivity.duration_seconds) : "Unknown"} detail={latestActivity?.activity_type ?? "Geen activity- of herstelbron"} icon="directions_run" />
                 <MetricCard label="Gewicht" value={latestWeight ? `${latestWeight.normalized_kg.toFixed(1)} kg` : "Unknown"} detail={latestWeight ? `Gemeten ${formatShortDate(latestWeight.measured_at)}` : "Geen syncdata"} icon="scale" />
-                <MetricCard label="Herstel / slaap" value="Unknown" detail="Geen herstel- of slaapbron" icon="bedtime" />
                 <MetricCard label="Fasting" value="Unknown" detail="Geen fastingbron" icon="timer" />
               </div>
               <WeightTrend weights={weights.slice(0, 14).reverse()} />
@@ -145,8 +131,7 @@ export default async function TodayPage() {
             </CortexPanel>
           </aside>
         </section>
-      </main>
-    </>
+    </main>
   );
 }
 
