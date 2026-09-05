@@ -7,7 +7,7 @@ type Item = { href?: string; label: string; icon: string; exact?: boolean };
 
 const items: Item[] = [
   { href: "/", label: "Dagbrief", icon: "wb_sunny", exact: true },
-  { href: "/unavailable/notes", label: "Ideeën", icon: "lightbulb" },
+  { href: "/ideas", label: "Ideeën", icon: "lightbulb" },
   { href: "/projects", label: "Projecten", icon: "layers" },
   { href: "/homelab", label: "Homelab", icon: "dns" },
   { href: "/actions", label: "Taken", icon: "check_box" },
