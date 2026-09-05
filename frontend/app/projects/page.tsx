@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { CortexPanel } from "../cortex-panel";
+
+import { StitchMetric, StitchPanel, StitchSectionTitle, StitchUnavailable } from "../stitch-primitives";
 import type { Project } from "./project-form";
 
 export const dynamic = "force-dynamic";
@@ -10,32 +11,19 @@ export default async function ProjectsPage() {
   const projects: Project[] = await response.json();
   const active = projects.filter((project) => project.status === "Active" || project.personal_status === "Active");
 
-  return (
-    <main className="mx-auto min-h-screen max-w-[1600px] px-margin-mobile py-space-lg md:px-margin-desktop md:pt-24">
-      <header className="flex flex-wrap items-start justify-between gap-space-base">
-        <div><p className="font-label-caps text-label-caps text-primary">SPRINT DIRECTIVES // LOKALE CONTEXT</p><h1 className="mt-space-xs font-headline text-headline-xl text-on-surface">Project tracker</h1><p className="mt-space-xs text-body-sm text-on-surface-variant">Lokale projectgegevens. Linear-workitems zijn alleen beschikbaar wanneer een read-model bestaat.</p><p className="mt-space-sm font-mono text-mono-data-sm text-outline">CYCLE: Unavailable by source</p></div>
-        <Link className="cortex-focus rounded bg-primary px-space-base py-space-sm font-headline text-headline-sm text-on-primary shadow-[0_0_15px_rgba(76,215,246,0.35)]" href="/projects/new">Nieuw project</Link>
-      </header>
-      <section className="mt-space-lg grid gap-space-base lg:grid-cols-3" aria-label="Projectsamenvatting">
-        <Metric label="PROJECTEN" value={String(projects.length)} detail="Lokale registry" />
-        <Metric label="ACTIEF" value={String(active.length)} detail="Status of persoonlijke status" />
-        <Metric label="LINEAR READ-MODEL" value="Unknown" detail="Geen actuele issue- of PR-feed beschikbaar" />
-      </section>
-      <section className="mt-space-lg" aria-label="Project roadmap"><SectionHeader eyebrow="ACTIVE PROJECTS" title="Lokale roadmap" detail="DETAILROUTES BESCHIKBAAR" /><div className="mt-space-base grid gap-space-base lg:grid-cols-3">{projects.map((project) => <Link className="cortex-focus block rounded-xl border border-surface-container-highest bg-surface-container p-space-base transition-colors hover:bg-surface-container-high" href={`/projects/${project.slug}`} key={project.slug}><div className="flex items-center justify-between gap-space-sm"><span className="font-mono text-mono-data-sm text-primary">{project.product_key}</span><span className="rounded bg-surface-container-high px-space-sm py-space-2xs font-mono text-mono-data-sm text-on-surface-variant">{project.status}</span></div><h2 className="mt-space-base font-headline text-headline-md text-on-surface">{project.display_name}</h2><p className="mt-space-xs line-clamp-3 text-body-sm text-on-surface-variant">{project.notes || project.product_label || "Geen aanvullende projectcontext bekend."}</p><div className="mt-space-base flex items-center justify-between border-t border-surface-container-highest pt-space-sm font-mono text-mono-data-sm text-outline"><span>{project.personal_status}</span><span>{project.activity_source}</span></div></Link>)}{!projects.length && <CortexPanel className="p-space-base lg:col-span-3"><p className="text-body-sm text-on-surface-variant">Geen projecten beschikbaar.</p></CortexPanel>}</div></section>
-      <section className="mt-space-xl" aria-label="Linear issue tracker"><SectionHeader eyebrow="LINEAR & PROJECTS" title="Issue tracker" detail="UNAVAILABLE BY SOURCE" /><div className="mt-space-base grid gap-space-base lg:grid-cols-3"><UnavailablePanel title="In progress" detail="HYD-160 issue-data ontbreekt." /><UnavailablePanel title="In review" detail="HYD-160 issue- en PR-data ontbreekt." /><UnavailablePanel title="Next cycle" detail="HYD-160 cycle-data ontbreekt." /></div></section>
-      <section className="mt-space-xl grid gap-space-base xl:grid-cols-12" aria-label="Project activity and repository"><UnavailablePanel className="xl:col-span-7" title="Activity stream" detail="Geen Linear-, GitHub- of PR-activity read-model beschikbaar." /><div className="grid gap-space-base sm:grid-cols-2 xl:col-span-5"><UnavailablePanel title="Repository state" detail="Geen repository-, branch- of CI-telemetriebron." /><UnavailablePanel title="Sprint copilot" detail="Geen HYD-160 context. Geen fictief voorstel of mutatiepad." /></div></section>
-    </main>
-  );
+  return <main className="mx-auto max-w-[1600px] px-margin-mobile py-space-lg md:px-margin-desktop" aria-label="Linear and projects tracker">
+    <header className="cortex-stitch-panel flex flex-wrap items-center justify-between gap-3 px-4 py-3"><div className="flex flex-wrap items-center gap-3"><span className="rounded bg-primary/10 px-2 py-1 font-label-caps text-label-caps text-primary">SPRINT DIRECTIVES</span><span className="font-mono text-mono-data-sm text-primary">CYCLE: UNAVAILABLE</span><span className="h-1.5 w-1.5 rounded-full bg-outline" /><span className="text-body-sm text-on-surface-variant">Geen cycle-read-model beschikbaar</span></div><div className="flex items-center gap-2"><span className="rounded bg-surface-container-high px-3 py-2 font-mono text-mono-data-sm text-outline">View options unavailable</span><Link className="cortex-focus rounded bg-primary px-3 py-2 font-headline text-headline-sm text-on-primary" href="/projects/new">+ Nieuw project</Link></div></header>
+
+    <section className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="Project summary metrics"><StitchMetric label="ACTIVE PROJECTS" value={String(active.length)} detail={active.length ? active.map((project) => project.product_key).join(" · ") : "Geen actieve lokale projecten"} tone="tertiary" /><StitchMetric label="SPRINT VELOCITY" value="Unavailable" detail="HYD-160 cycle-data ontbreekt" /><StitchMetric label="AVG BURN RATE" value="Unavailable" detail="Geen issue-tijdreeksbron" /><StitchMetric label="ACTIVE PRS" value="Unavailable" detail="Geen PR read-model" /></section>
+
+    <section className="mt-6 grid gap-4 xl:grid-cols-12" aria-label="Active cycle board"><div className="xl:col-span-8"><StitchSectionTitle eyebrow="ACTIVE CYCLE BOARD" title="Werkstroom" detail="SORT: UNAVAILABLE" /><div className="mt-3 grid gap-3 md:grid-cols-3"><CycleColumn title="In progress" detail="HYD-160 issue-data ontbreekt." /><CycleColumn title="In review" detail="HYD-160 issue- en PR-data ontbreekt." /><CycleColumn title="Next cycle" detail="HYD-160 cycle-data ontbreekt." /></div></div><aside className="space-y-3 xl:col-span-4"><StitchUnavailable title="Activity stream" detail="Geen Linear-, GitHub- of PR-activity read-model beschikbaar." /><StitchUnavailable title="Repository state" detail="Geen repository-, branch- of CI-telemetriebron." /><StitchUnavailable title="Cortex Sprint Copilot" detail="Geen HYD-160 context. Geen fictief voorstel of mutatiepad." /></aside></section>
+
+    <section className="mt-6" aria-label="Local project milestones"><StitchSectionTitle eyebrow="LOCAL PROJECT MILESTONES" title="Project roadmap" detail="DETAILROUTES BESCHIKBAAR" /><div className="mt-3 space-y-3">{projects.map((project) => <Link className="cortex-focus cortex-stitch-panel block px-4 py-3 transition-colors hover:bg-surface-container-high" href={`/projects/${project.slug}`} key={project.slug}><div className="flex flex-wrap items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-3"><span className="material-symbols-outlined text-primary" aria-hidden="true">view_timeline</span><div><h2 className="font-headline text-headline-md text-on-surface">{project.display_name}</h2><p className="mt-1 text-body-sm text-on-surface-variant">{project.notes || project.product_label || "Geen aanvullende projectcontext bekend."}</p></div></div><div className="flex items-center gap-2 font-mono text-mono-data-sm"><span className="rounded bg-surface-container-high px-2 py-1 text-on-surface-variant">{project.status}</span><span className="text-outline">{project.personal_status}</span></div></div></Link>)}{!projects.length && <StitchUnavailable title="Geen lokale projecten" detail="Maak een project om de roadmap te vullen." />}</div></section>
+  </main>;
 }
 
-function Metric({ label, value, detail }: Readonly<{ label: string; value: string; detail: string }>) {
-  return <CortexPanel className="p-space-base"><p className="font-label-caps text-label-caps text-outline">{label}</p><p className="mt-space-sm font-mono text-mono-metric-lg text-on-surface">{value}</p><p className="mt-space-xs text-body-sm text-on-surface-variant">{detail}</p></CortexPanel>;
-}
+interface CycleColumnProps { readonly title: string; readonly detail: string; }
 
-function SectionHeader({ eyebrow, title, detail }: Readonly<{ eyebrow: string; title: string; detail: string }>) {
-  return <div className="flex items-center justify-between gap-space-sm border-b border-surface-container-highest pb-space-sm"><div><p className="font-label-caps text-label-caps text-outline">{eyebrow}</p><h2 className="mt-space-xs font-headline text-headline-md text-on-surface">{title}</h2></div><span className="font-mono text-mono-data-sm text-outline">{detail}</span></div>;
-}
-
-function UnavailablePanel({ className = "", title, detail }: Readonly<{ className?: string; title: string; detail: string }>) {
-  return <CortexPanel className={`p-space-base ${className}`}><p className="font-label-caps text-label-caps text-outline">UNAVAILABLE BY SOURCE</p><h3 className="mt-space-xs font-headline text-headline-md text-on-surface">{title}</h3><p className="mt-space-sm text-body-sm text-on-surface-variant">{detail}</p></CortexPanel>;
+function CycleColumn({ title, detail }: CycleColumnProps) {
+  return <StitchPanel className="min-h-64 p-3"><div className="flex items-center justify-between gap-2"><h3 className="font-headline text-headline-sm text-on-surface">{title}</h3><span className="material-symbols-outlined text-outline" aria-hidden="true">add</span></div><div className="mt-4 rounded bg-surface-container-low p-3"><p className="font-label-caps text-label-caps text-outline">UNAVAILABLE BY SOURCE</p><p className="mt-2 text-body-sm text-on-surface-variant">{detail}</p></div></StitchPanel>;
 }
