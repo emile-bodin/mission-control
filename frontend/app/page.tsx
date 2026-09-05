@@ -68,10 +68,10 @@ export default async function TodayPage() {
           <span className="material-symbols-outlined text-primary" aria-hidden="true">neurology</span>
           <div className="min-w-0"><p className="truncate font-headline text-headline-sm uppercase tracking-tight text-on-surface">Cortex // Command</p><p className="hidden font-mono text-mono-data-sm text-tertiary sm:block">Bodin Control Center</p></div>
         </div>
-        <div className="hidden max-w-command-bar-max-width flex-1 items-center justify-between rounded-xl bg-surface-container px-space-md py-space-xs shadow-[inset_0_0_0_1px_#2e3545] sm:flex" aria-label="Command bar is nog niet beschikbaar">
+        <Link className="cortex-focus hidden max-w-command-bar-max-width flex-1 items-center justify-between rounded-xl bg-surface-container px-space-md py-space-xs shadow-[inset_0_0_0_1px_#2e3545] sm:flex" href="/ideas" aria-label="Open Second Brain capture">
           <span className="flex min-w-0 items-center gap-space-sm text-on-surface-variant"><span className="material-symbols-outlined text-[18px] text-primary" aria-hidden="true">auto_awesome</span><span className="truncate text-body-sm">Zoek of start een actie…</span></span>
           <kbd className="rounded bg-surface-container-lowest px-space-xs py-space-2xs font-mono text-mono-data-sm text-outline">⌘K</kbd>
-        </div>
+        </Link>
         <div className="flex items-center gap-space-sm"><span className="hidden font-mono text-mono-data-sm text-outline md:block">Europe/Amsterdam</span><Link className="cortex-focus grid h-8 w-8 place-items-center rounded-full bg-surface-bright font-mono text-mono-data-sm text-on-surface" href="/">EB</Link></div>
       </header>
 
@@ -83,11 +83,11 @@ export default async function TodayPage() {
               <div className="flex items-center gap-space-xs font-mono text-mono-data-sm text-primary"><span className="material-symbols-outlined text-[16px]" aria-hidden="true">auto_awesome</span>VANDAAGSE BRIEF</div>
               <h1 className="mt-space-sm font-headline text-headline-xl text-on-surface" id="daily-brief-title">Vandaag, Emile.</h1>
               <p className="mt-space-xs text-sm text-on-surface-variant">{briefing?.summary ?? "Geen geldige dagbriefing beschikbaar. Overzicht toont alleen beschikbare bronnen."}</p>
-              <div className="mt-space-lg grid gap-space-sm lg:grid-cols-3">
+              <section className="mt-space-lg grid gap-space-sm lg:grid-cols-3" aria-label="Autonome directives">
                 <BriefItem icon="auto_awesome" title={briefing ? "Briefing beschikbaar" : "Briefing: Unknown"} detail={briefing?.facts[0] ?? "Geen gevalideerde briefingfeiten."} tone="primary" />
                 <BriefItem icon="calendar_today" title={nextEvents.length ? `${nextEvents.length} komende afspraken` : "Agenda: geen afspraken"} detail={nextEvents[0] ? `${formatClock(nextEvents[0].starts_at)} · ${nextEvents[0].summary}` : calendarLabel(schedule.status)} tone="secondary" />
-                <BriefItem icon="notifications" title={openCards.length ? `${openCards.length} open signalen` : "Geen open signalen"} detail={openCards[0]?.next_safe_step ?? "Geen open statuskaart bekend."} tone="tertiary" />
-              </div>
+                <BriefItem icon="checklist" title={openActions.length ? `${openActions.length} open work-items` : "Geen open work-items"} detail={openActions[0]?.title ?? openCards[0]?.next_safe_step ?? "Geen open actie of statuskaart bekend."} tone="tertiary" />
+              </section>
             </div>
             <div className="flex flex-row gap-space-sm xl:w-60 xl:flex-col">
               <Link className="cortex-focus flex flex-1 items-center justify-center gap-space-xs rounded bg-primary px-space-base py-space-sm font-headline text-headline-sm text-on-primary shadow-[0_0_15px_rgba(76,215,246,0.35)]" href="/actions/new"><span className="material-symbols-outlined text-[18px]" aria-hidden="true">add</span>Nieuwe taak</Link>
@@ -96,9 +96,9 @@ export default async function TodayPage() {
           </div>
         </section>
 
-        <section className="mt-space-base grid gap-space-base md:grid-cols-2" aria-label="Operationele samenvatting">
-          <GlanceBar icon="layers" title="Projecten" detail={activeProjects.length ? activeProjects.map((project) => project.display_name).join(" · ") : "Geen actieve projecten bekend."} badge={activeProjects.length ? `${activeProjects.length} actief` : "Unknown"} />
-          <GlanceBar icon="dns" title="Pulse" detail={homelab.available ? `${pulseOnline}/${homelab.resources.length} resources online` : "Pulse status: Unknown."} badge={homelab.available ? "Beschikbaar" : "Unknown"} />
+        <section className="mt-space-base grid gap-space-base md:grid-cols-2" aria-label="Workspace en clustercontext">
+          <GlanceBar href="/projects" icon="layers" title="Linear workspace" detail={activeProjects.length ? activeProjects.map((project) => project.display_name).join(" · ") : "Lokale projecten: Unknown."} badge={activeProjects.length ? `${activeProjects.length} actief` : "Unavailable by source"} />
+          <GlanceBar href="/homelab" icon="dns" title="Cluster telemetry" detail={homelab.available ? `${pulseOnline}/${homelab.resources.length} resources online` : "Pulse status: Unknown."} badge={homelab.available ? "Beschikbaar" : "Unknown"} />
         </section>
 
         <section className="mt-space-lg grid grid-cols-1 items-start gap-space-lg lg:grid-cols-12">
@@ -106,13 +106,17 @@ export default async function TodayPage() {
             <CortexPanel className="p-space-base xl:p-space-lg">
               <PanelHeader icon="calendar_today" title="Chronologische agenda" detail={`${nextEvents.length} BLOKKEN`} action={<Link className="cortex-focus rounded bg-surface-container-high px-space-xs py-space-2xs text-body-sm text-on-surface" href="/agenda">Agenda</Link>} />
               {nextEvents.length ? <div className="relative ml-2 mt-space-base flex flex-col gap-space-md border-l border-surface-container-highest pl-4">{nextEvents.map((event, index) => <AgendaNode active={index === 0} event={event} key={`${event.starts_at}-${event.summary}`} />)}</div> : <EmptyTimeline calendarStatus={schedule.status} />}
+              <div className="mt-space-base border-t border-surface-container-highest pt-space-sm">
+                <div className="flex items-center justify-between gap-space-sm"><p className="font-label-caps text-label-caps text-outline">Werk-items</p><Link className="cortex-focus text-body-sm text-primary" href="/actions">Alle acties</Link></div>
+                {openActions.length ? <ul className="mt-space-sm space-y-space-xs">{openActions.slice(0, 3).map((action) => <li key={action.id}><Link className="cortex-focus flex items-center justify-between gap-space-sm rounded bg-surface-container-low px-space-sm py-space-xs text-body-sm text-on-surface hover:bg-surface-container-high" href={`/actions/${action.id}`}><span className="truncate">{action.title}</span><span className="shrink-0 font-mono text-mono-data-sm text-outline">{action.status}</span></Link></li>)}</ul> : <p className="mt-space-sm text-body-sm text-on-surface-variant">Geen open work-items.</p>}
+              </div>
             </CortexPanel>
 
             <CortexPanel className="p-space-base xl:p-space-lg">
               <PanelHeader icon="psychology" title="Stream Dock & Inname" detail={streamDock?.state.toUpperCase() ?? "UNKNOWN"} />
               <div className="mt-space-base rounded-lg bg-surface-container-low p-space-sm">
-                <label className="font-label-caps text-label-caps text-outline" htmlFor="stream-dock">Snelle capture</label>
-                <div className="mt-space-xs flex gap-space-sm"><input className="m-0 min-w-0 border-surface-container-highest bg-surface-container-lowest font-body text-body-sm text-outline disabled:cursor-not-allowed" disabled id="stream-dock" placeholder="Gebruik een gekoppeld apparaat voor capture" /><span className="flex shrink-0 items-center rounded bg-surface-container-high px-space-sm font-mono text-mono-data-sm text-outline" aria-label="Gekoppeld apparaat vereist">Ingest</span></div>
+                <p className="font-label-caps text-label-caps text-outline">Snelle capture</p>
+                <div className="mt-space-xs flex gap-space-sm"><p className="min-w-0 flex-1 py-space-xs text-body-sm text-on-surface-variant">Open Second Brain voor capture met gekoppelde browser-session.</p><Link className="cortex-focus flex shrink-0 items-center rounded bg-primary px-space-sm font-mono text-mono-data-sm text-on-primary" href="/ideas">Open dock</Link></div>
               </div>
               <div className="mt-space-base border-t border-surface-container-highest pt-space-sm"><p className="font-label-caps text-label-caps text-outline">Stream status</p><p className="mt-space-xs text-body-sm text-on-surface-variant">{streamDock?.reason ?? "Unknown: Cortex-data niet beschikbaar."}</p></div>
             </CortexPanel>
@@ -125,7 +129,8 @@ export default async function TodayPage() {
                 <MetricCard label="Stappen" value="Unknown" detail="Geen stappenbron" ring />
                 <MetricCard label="Activiteit" value={latestActivity ? formatDuration(latestActivity.duration_seconds) : "Unknown"} detail={latestActivity?.activity_type ?? "Geen syncdata"} icon="directions_run" />
                 <MetricCard label="Gewicht" value={latestWeight ? `${latestWeight.normalized_kg.toFixed(1)} kg` : "Unknown"} detail={latestWeight ? `Gemeten ${formatShortDate(latestWeight.measured_at)}` : "Geen syncdata"} icon="scale" />
-                <MetricCard label="Herstel" value="Unknown" detail="Geen herstelbron" icon="bedtime" />
+                <MetricCard label="Herstel / slaap" value="Unknown" detail="Geen herstel- of slaapbron" icon="bedtime" />
+                <MetricCard label="Fasting" value="Unknown" detail="Geen fastingbron" icon="timer" />
               </div>
               <WeightTrend weights={weights.slice(0, 14).reverse()} />
             </CortexPanel>
@@ -154,8 +159,8 @@ function BriefItem({ icon, title, detail, tone }: Readonly<{ icon: string; title
   return <article className="rounded-lg bg-surface-container-low p-space-sm"><div className={`flex items-center gap-space-xs font-mono text-mono-data-sm ${toneClass}`}><span className="material-symbols-outlined text-[16px]" aria-hidden="true">{icon}</span>{title}</div><p className="mt-space-xs line-clamp-2 text-body-sm text-on-surface-variant">{detail}</p></article>;
 }
 
-function GlanceBar({ icon, title, detail, badge }: Readonly<{ icon: string; title: string; detail: string; badge: string }>) {
-  return <CortexPanel className="flex items-center justify-between gap-space-base px-space-base py-space-sm"><div className="flex min-w-0 items-center gap-space-sm"><span className="material-symbols-outlined text-primary" aria-hidden="true">{icon}</span><span className="min-w-0"><span className="block font-headline text-headline-sm text-on-surface">{title}</span><span className="block truncate text-body-sm text-on-surface-variant">{detail}</span></span></div><span className="shrink-0 rounded bg-surface-container-high px-space-xs py-space-2xs font-mono text-mono-data-sm text-outline">{badge}</span></CortexPanel>;
+function GlanceBar({ href, icon, title, detail, badge }: Readonly<{ href: string; icon: string; title: string; detail: string; badge: string }>) {
+  return <Link className="cortex-focus cortex-panel flex items-center justify-between gap-space-base rounded-xl px-space-base py-space-sm hover:bg-surface-container-high" href={href}><div className="flex min-w-0 items-center gap-space-sm"><span className="material-symbols-outlined text-primary" aria-hidden="true">{icon}</span><span className="min-w-0"><span className="block font-headline text-headline-sm text-on-surface">{title}</span><span className="block truncate text-body-sm text-on-surface-variant">{detail}</span></span></div><span className="shrink-0 rounded bg-surface-container-high px-space-xs py-space-2xs font-mono text-mono-data-sm text-outline">{badge}</span></Link>;
 }
 
 function AgendaNode({ event, active }: Readonly<{ event: CalendarEvent; active: boolean }>) {
