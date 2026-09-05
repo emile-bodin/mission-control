@@ -2,6 +2,7 @@
 
 frontend/.next/
 frontend/node_modules/
+/.stitch/
 
 backend/__pycache__/
 backend/**/*.pyc

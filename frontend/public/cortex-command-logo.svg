@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" fill="none">
+  <rect width="48" height="48" rx="12" fill="#0B1322"/>
+  <circle cx="24" cy="24" r="16" stroke="url(#cortexGlow)" stroke-width="2" stroke-dasharray="3 3"/>
+  <path d="M24 14L32 20V28L24 34L16 28V20L24 14Z" stroke="#06B6D4" stroke-width="2" fill="#06B6D4" fill-opacity="0.15"/>
+  <circle cx="24" cy="24" r="4" fill="#38BDF8"/>
+  <path d="M24 14V20M32 28L27 25M16 28L21 25" stroke="#38BDF8" stroke-width="1.5" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="cortexGlow" x1="8" y1="8" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#06B6D4"/>
+      <stop offset="0.5" stop-color="#6366F1"/>
+      <stop offset="1" stop-color="#10B981"/>
+    </linearGradient>
+  </defs>
+</svg>
