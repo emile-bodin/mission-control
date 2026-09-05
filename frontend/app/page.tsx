@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { CortexCoprocessor, type CoprocessorAvailability } from "./cortex-coprocessor";
 import { CortexPanel } from "./cortex-panel";
 
 type StatusCard = { id: string; title: string; status: "OK" | "Let op" | "Actie nodig" | "Geblokkeerd" | "Onbekend"; next_safe_step: string; resolved_at: string | null };
@@ -37,6 +38,7 @@ async function getJson<T>(path: string, fallback: T): Promise<T> {
 
 export default async function TodayPage() {
   const cortex = await getJson<CortexToday | null>("/api/cortex/today", null);
+  const coprocessor = await getJson<CoprocessorAvailability>("/api/cortex/coprocessor", { state: "unavailable", reason: "Codex proposal-service is niet beschikbaar." });
   const cards = cortex?.status_cards ?? [];
   const actions = cortex?.actions ?? [];
   const schedule: Schedule = {
@@ -126,6 +128,10 @@ export default async function TodayPage() {
                 <MetricCard label="Herstel" value="Unknown" detail="Geen herstelbron" icon="bedtime" />
               </div>
               <WeightTrend weights={weights.slice(0, 14).reverse()} />
+            </CortexPanel>
+
+            <CortexPanel className="p-space-base xl:p-space-lg">
+              <CortexCoprocessor availability={coprocessor} />
             </CortexPanel>
 
             <CortexPanel className="overflow-hidden">

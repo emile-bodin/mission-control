@@ -22,6 +22,16 @@ from psycopg.rows import dict_row
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.briefings import BriefingProposal, BriefingRuntimeError, BriefingRuntimeTimeout, CodexRuntime, schedule_due
+from app.cortex_coprocessor import (
+    CodexProposalRuntime,
+    CoprocessorRuntimeError,
+    CoprocessorRuntimePending,
+    CoprocessorRuntimeTimeout,
+    CortexAvailability,
+    CortexProposalRequest,
+    CortexProposalResponse,
+    allowlisted_context,
+)
 
 
 class ProjectStatus(str, Enum):
@@ -2775,6 +2785,57 @@ def cortex_today(connection: psycopg.Connection) -> dict:
 @app.get("/api/cortex/today")
 def get_cortex_today(connection: psycopg.Connection = Depends(get_connection)) -> dict:
     return cortex_today(connection)
+
+
+def coprocessor_actions(action_ids: list[str], connection: psycopg.Connection) -> list[dict]:
+    if not action_ids:
+        return []
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id, title, status, priority, due_date FROM actions WHERE id = ANY(%s)",
+            (action_ids,),
+        )
+        return cursor.fetchall()
+
+
+@app.get("/api/cortex/coprocessor", response_model=CortexAvailability)
+def get_coprocessor_availability() -> CortexAvailability:
+    return CodexProposalRuntime(
+        os.environ.get("CODEX_RUNTIME_URL", ""),
+        os.environ.get("CODEX_RUNTIME_TOKEN", ""),
+    ).availability()
+
+
+@app.post("/api/cortex/coprocessor/proposals", response_model=CortexProposalResponse)
+def request_coprocessor_proposal(
+    request: CortexProposalRequest,
+    connection: psycopg.Connection = Depends(get_connection),
+) -> CortexProposalResponse:
+    context, categories = allowlisted_context(request, coprocessor_actions(request.action_ids, connection))
+    generated_at = datetime.now(UTC)
+    try:
+        proposal = CodexProposalRuntime(
+            os.environ.get("CODEX_RUNTIME_URL", ""),
+            os.environ.get("CODEX_RUNTIME_TOKEN", ""),
+        ).run(context)
+    except CoprocessorRuntimePending:
+        return CortexProposalResponse(
+            state="pending", generated_at=generated_at, context_categories=categories,
+            reason="Codex werkt al aan een voorstel.",
+        )
+    except CoprocessorRuntimeTimeout:
+        return CortexProposalResponse(
+            state="error", generated_at=generated_at, context_categories=categories,
+            reason="Codex proposal-service reageerde niet op tijd.",
+        )
+    except CoprocessorRuntimeError:
+        return CortexProposalResponse(
+            state="unavailable", generated_at=generated_at, context_categories=categories,
+            reason="Codex proposal-service is niet beschikbaar.",
+        )
+    return CortexProposalResponse(
+        state="proposal", proposal=proposal, generated_at=generated_at, context_categories=categories,
+    )
 
 
 def require_stream_owner(
