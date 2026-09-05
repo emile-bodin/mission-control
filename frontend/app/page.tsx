@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LocalClock } from "./local-clock";
+import { CortexPanel } from "./cortex-panel";
 
 type StatusCard = { id: string; title: string; status: "OK" | "Let op" | "Actie nodig" | "Geblokkeerd" | "Onbekend"; next_safe_step: string; resolved_at: string | null };
 type Action = { id: string; title: string; status: "Open" | "Bezig" | "Klaar" | "Later"; priority: string; due_date: string | null; updated_at: string };
@@ -41,73 +41,136 @@ export default async function TodayPage() {
   const activeProjects = projects.filter((project) => isActive(project.status) || isActive(project.personal_status)).slice(0, 3);
   const latestWeight = weights[0];
   const latestActivity = activities[0];
-  const attentionCount = openCards.filter((card) => card.status === "Actie nodig" || card.status === "Geblokkeerd").length;
   const pulseOnline = homelab.resources.filter((resource) => resource.status.toLowerCase() === "online").length;
-  const calendarConnected = schedule.status === "Beschikbaar";
+  const dataAvailable = schedule.status === "Beschikbaar" || homelab.available || Boolean(latestWeight || latestActivity);
 
-  return <main className="mx-auto max-w-[1440px] px-5 py-8 sm:px-8 lg:px-10 lg:py-9">
-    <header className="flex flex-wrap items-start justify-between gap-6">
-      <div><p className="text-sm font-medium text-indigo-300">Vandaag</p><h1 className="mt-1 text-3xl font-semibold tracking-tight text-white sm:text-4xl">Goedenavond, Emile <span aria-hidden="true">👋</span></h1><p className="mt-2 text-sm text-slate-400">Hier is je overzicht voor vandaag.</p></div>
-      <LocalClock />
-    </header>
-
-    <div className="mt-8 grid items-stretch gap-5 xl:grid-cols-2">
-      <Panel title="AI Brief" icon="✦" className="min-h-[20rem]">
-        <span className="inline-flex rounded-lg bg-indigo-500/15 px-2.5 py-1 text-xs font-medium text-indigo-300">✦ Top inzichten</span>
-        <ul className="mt-5 space-y-3 text-sm text-slate-300">
-          <Insight>{openActions.length ? `${openActions.length} open taak${openActions.length === 1 ? "" : "en"}${attentionCount ? ` · ${attentionCount} vraagt aandacht` : ""}.` : "Open taken: geen bekend."}</Insight>
-          <Insight>{latestWeight ? `Laatste gewicht: ${latestWeight.normalized_kg.toFixed(1)} kg.` : "Health sync: Unknown."}</Insight>
-          <Insight>{activeProjects.length ? `${activeProjects.length} actief project${activeProjects.length === 1 ? "" : "en"} bekend.` : "Projectstatus: Unknown."}</Insight>
-          <Insight>{homelab.available ? `Pulse: ${pulseOnline} van ${homelab.resources.length} modules online.` : "Pulse status: Unknown."}</Insight>
-        </ul>
-        <p className="mt-auto pt-10 text-xs text-slate-500">Statische samenvatting op basis van beschikbare dashboarddata.</p>
-      </Panel>
-
-      <Panel title="Agenda" icon="□" action={<Link className="cockpit-link" href="/agenda">Volledige agenda</Link>}>
-        {calendarConnected && nextEvents.length ? <div className="space-y-2">{nextEvents.map((event) => <article className="cockpit-inset grid grid-cols-[5.4rem_1fr] gap-4 rounded-xl px-3 py-3" key={`${event.starts_at}-${event.summary}`}><time className="text-xs font-medium leading-5 text-slate-300"><span className="block">{formatDate(event.starts_at)}</span><span className="block text-sm text-white">{formatClock(event.starts_at)}</span></time><div><h3 className="font-medium text-slate-100">{event.summary}</h3><p className="mt-1 text-xs text-slate-500">Agenda-item</p></div></article>)}</div> : <CalendarPlaceholder connected={calendarConnected} />}
-      </Panel>
-
-      <Panel title="Health & History" icon="♡" id="health" action={<span className="text-xs text-slate-500">Historie: Unknown</span>}>
-        <div className="mb-4 flex gap-5 border-b border-slate-800 text-sm"><span className="border-b-2 border-indigo-400 pb-2 text-indigo-300">Overzicht</span><span className="pb-2 text-slate-500">Historie</span></div>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Metric label="Gewicht" value={latestWeight ? `${latestWeight.normalized_kg.toFixed(1)} kg` : "Unknown"} detail={latestWeight ? `Gemeten ${formatShortDate(latestWeight.measured_at)}` : "Geen syncdata"} />
-          <Metric label="Stappen" value="Unknown" detail="Geen stappenbron" />
-          <Metric label="Activiteit" value={latestActivity ? formatDuration(latestActivity.duration_seconds) : "Unknown"} detail={latestActivity ? latestActivity.activity_type : "Geen syncdata"} />
+  return (
+    <>
+      <header className="sticky top-0 z-40 flex h-16 items-center justify-between gap-space-base border-b border-surface-container-high bg-surface-container-lowest/80 px-space-base backdrop-blur-xl md:fixed md:left-16 md:right-0 lg:left-sidebar-width" aria-label="Cortex Command topbar">
+        <div className="flex min-w-0 items-center gap-space-sm">
+          <span className="material-symbols-outlined text-primary" aria-hidden="true">neurology</span>
+          <div className="min-w-0"><p className="truncate font-headline text-headline-sm uppercase tracking-tight text-on-surface">Cortex // Command</p><p className="hidden font-mono text-mono-data-sm text-tertiary sm:block">Bodin Control Center</p></div>
         </div>
-        <WeightTrend weights={weights.slice(0, 7).reverse()} />
-      </Panel>
+        <div className="hidden max-w-command-bar-max-width flex-1 items-center justify-between rounded-xl bg-surface-container px-space-md py-space-xs shadow-[inset_0_0_0_1px_#2e3545] sm:flex" aria-label="Command bar is nog niet beschikbaar">
+          <span className="flex min-w-0 items-center gap-space-sm text-on-surface-variant"><span className="material-symbols-outlined text-[18px] text-primary" aria-hidden="true">auto_awesome</span><span className="truncate text-body-sm">Zoek of start een actie…</span></span>
+          <kbd className="rounded bg-surface-container-lowest px-space-xs py-space-2xs font-mono text-mono-data-sm text-outline">⌘K</kbd>
+        </div>
+        <div className="flex items-center gap-space-sm"><span className="hidden font-mono text-mono-data-sm text-outline md:block">Europe/Amsterdam</span><Link className="cortex-focus grid h-8 w-8 place-items-center rounded-full bg-surface-bright font-mono text-mono-data-sm text-on-surface" href="/">EB</Link></div>
+      </header>
 
-      <Panel title="Open taken" icon="☑" action={<Link className="cockpit-link" href="/actions">Alle taken</Link>}>
-        <div className="space-y-2">{openActions.slice(0, 5).map((action) => <Link className="cockpit-inset grid grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-3 rounded-xl px-3 py-3 transition" href={`/actions/${action.id}`} key={action.id}><span className="h-4 w-4 rounded border border-slate-600" aria-hidden="true" /><span className="min-w-0"><span className="block truncate text-sm font-medium text-slate-100">{action.title}</span><span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[11px] font-medium leading-none ${priorityClass(action.priority)}`}>{action.priority || "Unknown"}</span></span><span className="whitespace-nowrap text-xs text-slate-500">{action.due_date ? dueLabel(action.due_date) : "Geen datum"}</span></Link>)}{!openActions.length && <p className="rounded-xl border border-dashed border-slate-700 px-4 py-6 text-sm text-slate-500">Geen open taken bekend.</p>}</div>
-        <Link className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-indigo-300 hover:text-indigo-200" href="/actions/new">＋ Nieuwe taak</Link>
-      </Panel>
-    </div>
+      <main className="mx-auto max-w-[1600px] px-margin-mobile py-space-lg md:px-margin-desktop md:pb-space-3xl md:pt-24" aria-label="Vandaag">
+        <section className="relative overflow-hidden rounded-xl border border-surface-container-high bg-surface-container p-space-base shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] xl:p-space-lg" aria-labelledby="daily-brief-title">
+          <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-[radial-gradient(ellipse_at_top_left,rgba(76,215,246,0.16),transparent_55%)]" aria-hidden="true" />
+          <div className="relative flex flex-col gap-space-lg xl:flex-row xl:items-stretch">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-space-xs font-mono text-mono-data-sm text-primary"><span className="material-symbols-outlined text-[16px]" aria-hidden="true">auto_awesome</span>VANDAAGSE BRIEF</div>
+              <h1 className="mt-space-sm font-headline text-headline-xl text-on-surface" id="daily-brief-title">Vandaag, Emile.</h1>
+              <p className="mt-space-xs text-sm text-on-surface-variant">Overzicht op basis van beschikbare agenda-, actie-, project- en Pulse-data.</p>
+              <div className="mt-space-lg grid gap-space-sm lg:grid-cols-3">
+                <BriefItem icon="check_box" title={openActions.length ? `${openActions.length} open taken` : "Geen open taken"} detail={openActions[0]?.title ?? "Geen open taak bekend."} tone="primary" />
+                <BriefItem icon="calendar_today" title={nextEvents.length ? `${nextEvents.length} komende afspraken` : "Agenda: geen afspraken"} detail={nextEvents[0] ? `${formatClock(nextEvents[0].starts_at)} · ${nextEvents[0].summary}` : calendarLabel(schedule.status)} tone="secondary" />
+                <BriefItem icon="notifications" title={openCards.length ? `${openCards.length} open signalen` : "Geen open signalen"} detail={openCards[0]?.next_safe_step ?? "Geen open statuskaart bekend."} tone="tertiary" />
+              </div>
+            </div>
+            <div className="flex flex-row gap-space-sm xl:w-60 xl:flex-col">
+              <Link className="cortex-focus flex flex-1 items-center justify-center gap-space-xs rounded bg-primary px-space-base py-space-sm font-headline text-headline-sm text-on-primary shadow-[0_0_15px_rgba(76,215,246,0.35)]" href="/actions/new"><span className="material-symbols-outlined text-[18px]" aria-hidden="true">add</span>Nieuwe taak</Link>
+              <Link className="cortex-focus flex flex-1 items-center justify-center gap-space-xs rounded bg-surface-container-high px-space-base py-space-sm text-body-sm text-on-surface" href="/routines"><span className="material-symbols-outlined text-[18px] text-primary" aria-hidden="true">play_arrow</span>Routines</Link>
+            </div>
+          </div>
+        </section>
 
-    <section className="mt-5 grid gap-5 lg:grid-cols-[1.12fr_0.9fr_0.9fr]">
-      <Panel title="Quick Access" className="min-h-[10rem]"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><QuickAccess href="/actions/new" icon="＋" label="Nieuwe taak" /><QuickAccess icon="♡" label="Health loggen" /><QuickAccess icon="▤" label="Nieuwe notitie" /><QuickAccess icon="◎" label="Focus starten" /></div></Panel>
-      <Panel title="Actieve projecten" icon="⌘" action={<Link className="cockpit-link" href="/projects">Alle projecten</Link>}><div className="space-y-4">{activeProjects.length ? activeProjects.map((project) => <Link className="block" href={`/projects/${project.slug}`} key={project.slug}><div className="flex justify-between gap-3 text-sm"><span className="truncate font-medium text-slate-200">{project.display_name}</span><span className="text-xs text-slate-500">Voortgang: Unknown</span></div><div className="mt-2 h-1.5 rounded-full bg-slate-800" /></Link>) : <UnknownProjects />}</div></Panel>
-      <Panel title="Pulse Overview" action={<Link className="cockpit-link" href="/homelab">Pulse bekijken</Link>}><div className="space-y-3">{homelab.resources.slice(0, 3).map((resource) => <PulseItem resource={resource} key={resource.id} />)}{!homelab.resources.length && <p className="text-sm text-slate-500">Pulse status: Unknown.</p>}</div></Panel>
-    </section>
-  </main>;
+        <section className="mt-space-base grid gap-space-base md:grid-cols-2" aria-label="Operationele samenvatting">
+          <GlanceBar icon="layers" title="Projecten" detail={activeProjects.length ? activeProjects.map((project) => project.display_name).join(" · ") : "Geen actieve projecten bekend."} badge={activeProjects.length ? `${activeProjects.length} actief` : "Unknown"} />
+          <GlanceBar icon="dns" title="Pulse" detail={homelab.available ? `${pulseOnline}/${homelab.resources.length} resources online` : "Pulse status: Unknown."} badge={homelab.available ? "Beschikbaar" : "Unknown"} />
+        </section>
+
+        <section className="mt-space-lg grid grid-cols-1 items-start gap-space-lg lg:grid-cols-12">
+          <div className="flex flex-col gap-space-base lg:col-span-7">
+            <CortexPanel className="p-space-base xl:p-space-lg">
+              <PanelHeader icon="calendar_today" title="Chronologische agenda" detail={`${nextEvents.length} BLOKKEN`} action={<Link className="cortex-focus rounded bg-surface-container-high px-space-xs py-space-2xs text-body-sm text-on-surface" href="/agenda">Agenda</Link>} />
+              {nextEvents.length ? <div className="relative ml-2 mt-space-base flex flex-col gap-space-md border-l border-surface-container-highest pl-4">{nextEvents.map((event, index) => <AgendaNode active={index === 0} event={event} key={`${event.starts_at}-${event.summary}`} />)}</div> : <EmptyTimeline calendarStatus={schedule.status} />}
+            </CortexPanel>
+
+            <CortexPanel className="p-space-base xl:p-space-lg">
+              <PanelHeader icon="psychology" title="Stream Dock & Inname" detail="READ-ONLY" />
+              <div className="mt-space-base rounded-lg bg-surface-container-low p-space-sm">
+                <label className="font-label-caps text-label-caps text-outline" htmlFor="stream-dock">Snelle capture</label>
+                <div className="mt-space-xs flex gap-space-sm"><input className="m-0 min-w-0 border-surface-container-highest bg-surface-container-lowest font-body text-body-sm text-outline disabled:cursor-not-allowed" disabled id="stream-dock" placeholder="Stream Dock komt in een volgende fase beschikbaar" /><span className="flex shrink-0 items-center rounded bg-surface-container-high px-space-sm font-mono text-mono-data-sm text-outline" aria-label="Niet beschikbaar">Ingest</span></div>
+              </div>
+              <div className="mt-space-base border-t border-surface-container-highest pt-space-sm"><p className="font-label-caps text-label-caps text-outline">Stream status</p><p className="mt-space-xs text-body-sm text-on-surface-variant">Geen Stream Dock-items beschikbaar. Deze shell voert geen mutaties uit.</p></div>
+            </CortexPanel>
+          </div>
+
+          <aside className="flex flex-col gap-space-base lg:col-span-5" aria-label="Inspector">
+            <CortexPanel className="p-space-base xl:p-space-lg">
+              <PanelHeader icon="monitor_heart" title="Health & herstel" detail={latestWeight || latestActivity ? "BESCHIKBAAR" : "UNKNOWN"} />
+              <div className="mt-space-base grid gap-space-sm sm:grid-cols-2">
+                <MetricCard label="Stappen" value="Unknown" detail="Geen stappenbron" ring />
+                <MetricCard label="Activiteit" value={latestActivity ? formatDuration(latestActivity.duration_seconds) : "Unknown"} detail={latestActivity?.activity_type ?? "Geen syncdata"} icon="directions_run" />
+                <MetricCard label="Gewicht" value={latestWeight ? `${latestWeight.normalized_kg.toFixed(1)} kg` : "Unknown"} detail={latestWeight ? `Gemeten ${formatShortDate(latestWeight.measured_at)}` : "Geen syncdata"} icon="scale" />
+                <MetricCard label="Herstel" value="Unknown" detail="Geen herstelbron" icon="bedtime" />
+              </div>
+              <WeightTrend weights={weights.slice(0, 14).reverse()} />
+            </CortexPanel>
+
+            <CortexPanel className="overflow-hidden">
+              <div className="border-b border-surface-container-highest px-space-base py-space-sm"><p className="font-label-caps text-label-caps text-outline">Data inspector</p><div className="mt-space-xs flex items-center justify-between"><p className="font-headline text-headline-md text-on-surface">Beschikbare bronnen</p><span className={`flex items-center gap-space-xs font-mono text-mono-data-sm ${dataAvailable ? "text-tertiary" : "text-outline"}`}><span className={`h-1.5 w-1.5 rounded-full ${dataAvailable ? "bg-tertiary" : "bg-outline"}`} />{dataAvailable ? "BESCHIKBAAR" : "UNKNOWN"}</span></div></div>
+              <dl className="divide-y divide-surface-container-highest px-space-base"><SourceRow label="Agenda" value={calendarLabel(schedule.status)} /><SourceRow label="Pulse" value={homelab.available ? `${pulseOnline}/${homelab.resources.length} online` : "Unknown"} /><SourceRow label="Health" value={latestWeight || latestActivity ? "Beschikbaar" : "Unknown"} /></dl>
+            </CortexPanel>
+          </aside>
+        </section>
+      </main>
+    </>
+  );
 }
 
-function Panel({ title, icon, action, children, className = "", id }: { title: string; icon?: string; action?: React.ReactNode; children: React.ReactNode; className?: string; id?: string }) {
-  return <section className={`cockpit-card flex h-full flex-col rounded-2xl border p-5 ${className}`} id={id}><header className="mb-5 flex items-center justify-between gap-3"><h2 className="flex items-center gap-3 text-base font-semibold text-white"><span className="text-lg text-slate-300" aria-hidden="true">{icon}</span>{title}</h2>{action}</header>{children}</section>;
+function PanelHeader({ icon, title, detail, action }: Readonly<{ icon: string; title: string; detail?: string; action?: React.ReactNode }>) {
+  return <header className="flex items-center justify-between gap-space-sm"><div className="flex min-w-0 items-center gap-space-sm"><span className="material-symbols-outlined text-[20px] text-primary" aria-hidden="true">{icon}</span><h2 className="truncate font-headline text-headline-md text-on-surface">{title}</h2>{detail && <span className="hidden rounded bg-surface-container-high px-space-xs py-space-2xs font-mono text-mono-data-sm text-outline sm:inline">{detail}</span>}</div>{action}</header>;
 }
 
-function Insight({ children }: { children: React.ReactNode }) { return <li className="flex gap-3"><span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-400" />{children}</li>; }
-function Metric({ label, value, detail }: { label: string; value: string; detail: string }) { return <article className="cockpit-metric rounded-xl p-3"><p className="text-xs text-slate-400">{label}</p><p className="mt-1 text-xl font-semibold tracking-tight text-white">{value}</p><p className="mt-2 text-xs text-slate-500">{detail}</p></article>; }
-function QuickAccess({ href, icon, label }: { href?: string; icon: string; label: string }) { const content = <><span className="grid h-8 w-8 place-items-center rounded-full bg-blue-500/20 text-lg text-blue-300">{icon}</span><span className="text-xs font-medium text-slate-200">{label}</span>{!href && <span className="text-[10px] text-slate-500">Unknown</span>}</>; const className = "cockpit-quick-access flex min-h-24 flex-col items-center justify-center gap-2 rounded-xl px-2 text-center transition"; return href ? <Link className={className} href={href}>{content}</Link> : <span className={`${className} cursor-not-allowed opacity-75`} aria-disabled="true">{content}</span>; }
-function CalendarPlaceholder({ connected }: { connected: boolean }) { return <div className="cockpit-inset rounded-xl border-dashed p-4"><p className="text-sm font-medium text-slate-300">{connected ? "Geen komende afspraken" : "Agenda niet gekoppeld"}</p><p className="mt-1 text-xs text-slate-500">{connected ? "Geen afspraken in huidige kalenderfeed." : "Google Calendar-status: Unknown."}</p><div className="mt-4 space-y-2 opacity-40" aria-hidden="true"><div className="h-12 rounded-lg bg-slate-800" /><div className="h-12 rounded-lg bg-slate-800" /><div className="h-12 rounded-lg bg-slate-800" /></div></div>; }
-function WeightTrend({ weights }: { weights: Weight[] }) { if (weights.length < 2) return <div className="mt-5 rounded-xl border border-dashed border-slate-700 px-4 py-5 text-xs text-slate-500">Gewichtstrend: Unknown — minimaal twee metingen nodig.</div>; const values = weights.map((weight) => weight.normalized_kg); const min = Math.min(...values); const max = Math.max(...values); const range = max - min || 1; const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${90 - ((value - min) / range) * 65}`).join(" "); return <figure className="mt-5"><figcaption className="mb-2 flex justify-between text-xs text-slate-500"><span>Gewichtstrend</span><span>{min.toFixed(1)}–{max.toFixed(1)} kg</span></figcaption><svg className="h-24 w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Gewichtstrend van beschikbare metingen"><path d="M0 90H100" stroke="currentColor" className="text-slate-700" strokeWidth="1" vectorEffect="non-scaling-stroke" /><polyline points={points} fill="none" stroke="currentColor" className="text-indigo-400" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg><div className="flex justify-between text-[11px] text-slate-600"><span>{formatShortDate(weights[0].measured_at)}</span><span>{formatShortDate(weights[weights.length - 1].measured_at)}</span></div></figure>; }
-function UnknownProjects() { return <>{["Project 1", "Project 2", "Project 3"].map((name) => <div key={name}><div className="flex justify-between text-sm"><span className="text-slate-500">{name}</span><span className="text-xs text-slate-600">Unknown</span></div><div className="mt-2 h-1.5 rounded-full bg-slate-800" /></div>)}</>; }
-function PulseItem({ resource }: { resource: PulseResource }) { const label = pulseLabel(resource.status); return <div className="flex items-center justify-between gap-3 text-sm"><span className="min-w-0 truncate text-slate-300">{resource.name}</span><span className={`inline-flex shrink-0 items-center gap-1.5 text-xs ${label === "Online" ? "text-emerald-400" : "text-slate-500"}`}><span className={`h-2 w-2 rounded-full ${label === "Online" ? "bg-emerald-400" : "bg-slate-600"}`} />{label}</span></div>; }
+function BriefItem({ icon, title, detail, tone }: Readonly<{ icon: string; title: string; detail: string; tone: "primary" | "secondary" | "tertiary" }>) {
+  const toneClass = tone === "primary" ? "text-primary" : tone === "secondary" ? "text-secondary-fixed-dim" : "text-tertiary";
+  return <article className="rounded-lg bg-surface-container-low p-space-sm"><div className={`flex items-center gap-space-xs font-mono text-mono-data-sm ${toneClass}`}><span className="material-symbols-outlined text-[16px]" aria-hidden="true">{icon}</span>{title}</div><p className="mt-space-xs line-clamp-2 text-body-sm text-on-surface-variant">{detail}</p></article>;
+}
+
+function GlanceBar({ icon, title, detail, badge }: Readonly<{ icon: string; title: string; detail: string; badge: string }>) {
+  return <CortexPanel className="flex items-center justify-between gap-space-base px-space-base py-space-sm"><div className="flex min-w-0 items-center gap-space-sm"><span className="material-symbols-outlined text-primary" aria-hidden="true">{icon}</span><span className="min-w-0"><span className="block font-headline text-headline-sm text-on-surface">{title}</span><span className="block truncate text-body-sm text-on-surface-variant">{detail}</span></span></div><span className="shrink-0 rounded bg-surface-container-high px-space-xs py-space-2xs font-mono text-mono-data-sm text-outline">{badge}</span></CortexPanel>;
+}
+
+function AgendaNode({ event, active }: Readonly<{ event: CalendarEvent; active: boolean }>) {
+  return <article className={`relative rounded-lg p-space-sm ${active ? "bg-surface-container-high shadow-[inset_2px_0_0_0_#4cd7f6]" : "bg-surface-container-low"}`}><span className={`absolute -left-[21px] top-4 h-2.5 w-2.5 rounded-full ring-4 ring-surface-container ${active ? "bg-primary shadow-[0_0_8px_rgba(76,215,246,0.8)]" : "bg-outline"}`} aria-hidden="true" /><div className="flex items-center justify-between gap-space-sm"><time className={`font-mono text-mono-data-sm ${active ? "text-primary" : "text-on-surface-variant"}`}>{formatClock(event.starts_at)}</time><span className="rounded bg-surface-container-highest px-space-xs py-space-2xs font-mono text-mono-data-sm text-outline">Agenda</span></div><h3 className="mt-space-xs font-headline text-headline-sm text-on-surface">{event.summary}</h3><p className="mt-space-2xs text-body-sm text-on-surface-variant">{formatDate(event.starts_at)}</p></article>;
+}
+
+function EmptyTimeline({ calendarStatus }: Readonly<{ calendarStatus: string }>) {
+  return <div className="mt-space-base rounded-lg border border-dashed border-surface-container-highest p-space-base text-body-sm text-on-surface-variant"><p className="font-headline text-headline-sm text-on-surface">Geen komende afspraken</p><p className="mt-space-xs">{calendarLabel(calendarStatus)}</p></div>;
+}
+
+function MetricCard({ label, value, detail, icon, ring = false }: Readonly<{ label: string; value: string; detail: string; icon?: string; ring?: boolean }>) {
+  return <article className="flex min-h-36 flex-col justify-between rounded-lg bg-surface-container-low p-space-sm"><div className="flex items-center justify-between gap-space-sm"><span className="font-label-caps text-label-caps text-outline">{label}</span>{icon && <span className="material-symbols-outlined text-[18px] text-primary" aria-hidden="true">{icon}</span>}</div><div className="flex items-end justify-between gap-space-sm"><div><p className="font-mono text-mono-metric-lg text-on-surface">{value}</p><p className="mt-space-2xs font-mono text-mono-data-sm text-outline">{detail}</p></div>{ring && <EmptyRing />}</div></article>;
+}
+
+function EmptyRing() {
+  return <div className="relative h-16 w-16 shrink-0"><svg className="h-full w-full -rotate-90" viewBox="0 0 36 36" aria-hidden="true"><path className="text-surface-container-highest" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" fill="none" stroke="currentColor" strokeWidth="3.5" /></svg><span className="absolute inset-0 grid place-items-center font-mono text-mono-data-sm text-outline">—</span></div>;
+}
+
+function WeightTrend({ weights }: Readonly<{ weights: Weight[] }>) {
+  if (weights.length < 2) return <div className="mt-space-base border-t border-surface-container-highest pt-space-sm font-mono text-mono-data-sm text-outline">Gewichtstrend: Unknown — minimaal twee metingen nodig.</div>;
+  const values = weights.map((weight) => weight.normalized_kg);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${90 - ((value - min) / range) * 65}`).join(" ");
+  return <figure className="mt-space-base border-t border-surface-container-highest pt-space-sm"><figcaption className="flex justify-between font-mono text-mono-data-sm text-outline"><span>GEWICHTSTREND</span><span>{min.toFixed(1)}–{max.toFixed(1)} kg</span></figcaption><svg className="mt-space-sm h-16 w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Gewichtstrend van beschikbare metingen"><path d="M0 90H100" stroke="currentColor" className="text-surface-container-highest" strokeWidth="1" vectorEffect="non-scaling-stroke" /><polyline points={points} fill="none" stroke="currentColor" className="text-primary" strokeWidth="2" vectorEffect="non-scaling-stroke" /></svg></figure>;
+}
+
+function SourceRow({ label, value }: Readonly<{ label: string; value: string }>) {
+  return <div className="flex items-center justify-between gap-space-base py-space-sm"><dt className="font-mono text-mono-data-sm text-outline">{label}</dt><dd className="text-right font-mono text-mono-data-sm text-on-surface-variant">{value}</dd></div>;
+}
+
 function compareActions(a: Action, b: Action) { return (a.due_date || "9999-12-31").localeCompare(b.due_date || "9999-12-31") || a.updated_at.localeCompare(b.updated_at); }
 function isActive(value: string) { return value.toLowerCase() === "active"; }
-function pulseLabel(status: string) { return status === "online" ? "Online" : status === "Unknown" ? "Unknown" : status; }
-function priorityClass(priority: string) { const value = priority.toLowerCase(); return value.includes("high") || value.includes("hoog") ? "bg-red-500/15 text-red-300" : value.includes("medium") || value.includes("middel") ? "bg-amber-500/15 text-amber-300" : value.includes("low") || value.includes("laag") ? "bg-blue-500/15 text-blue-300" : "bg-slate-700 text-slate-300"; }
+function calendarLabel(status: string) { return status === "Beschikbaar" ? "Agenda beschikbaar" : "Agenda: Unknown"; }
 function formatDate(value: string) { return new Intl.DateTimeFormat("nl-NL", { weekday: "short", day: "numeric", month: "short", timeZone: "Europe/Amsterdam" }).format(new Date(value)); }
 function formatClock(value: string) { return new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Amsterdam" }).format(new Date(value)); }
 function formatShortDate(value: string) { return new Intl.DateTimeFormat("nl-NL", { day: "numeric", month: "short", timeZone: "Europe/Amsterdam" }).format(new Date(value)); }
-function dueLabel(value: string) { return new Intl.DateTimeFormat("nl-NL", { day: "numeric", month: "short", timeZone: "Europe/Amsterdam" }).format(new Date(`${value}T12:00:00Z`)); }
 function formatDuration(value: number | null) { return value === null ? "Unknown" : `${Math.max(0, Math.round(value / 60))} min`; }
