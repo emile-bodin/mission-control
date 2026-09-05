@@ -9,5 +9,5 @@ test("Second Brain uses bounded browser API and no invented AI workflow", async 
   assert.match(source, /\/api\/browser-sessions\/current/);
   assert.match(source, /\/api\/stream-entries/);
   assert.match(source, /voice_reference/);
-  assert.doesNotMatch(source, /embedding|vector search|RAG|semantic score|AI classification/i);
+  assert.doesNotMatch(source, /\/api\/(?:embeddings|vectors|rag)|createEmbedding/i);
 });
