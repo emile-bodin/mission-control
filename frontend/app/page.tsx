@@ -70,7 +70,7 @@ export default async function TodayPage() {
               <div className="flex items-center gap-space-xs font-mono text-mono-data-sm text-primary"><span className="material-symbols-outlined text-[16px]" aria-hidden="true">auto_awesome</span>VANDAAGSE BRIEF</div>
               <h1 className="mt-space-sm font-headline text-headline-xl text-on-surface" id="daily-brief-title">Vandaag, Emile.</h1>
               <p className="mt-space-xs text-sm text-on-surface-variant">{briefing?.summary ?? "Geen geldige dagbriefing beschikbaar. Overzicht toont alleen beschikbare bronnen."}</p>
-              <section className="mt-space-lg grid gap-space-sm lg:grid-cols-3" aria-label="Autonome directives">
+              <section className="mt-space-lg grid gap-space-sm lg:grid-cols-3" aria-label="Dagbriefing en context">
                 <BriefItem icon="auto_awesome" title={briefing ? "Briefing beschikbaar" : "Briefing: Unknown"} detail={briefing?.facts[0] ?? "Geen gevalideerde briefingfeiten."} tone="primary" />
                 <BriefItem icon="calendar_today" title={nextEvents.length ? `${nextEvents.length} komende afspraken` : "Agenda: geen afspraken"} detail={nextEvents[0] ? `${formatClock(nextEvents[0].starts_at)} · ${nextEvents[0].summary}` : calendarLabel(schedule.status)} tone="secondary" />
                 <BriefItem icon="checklist" title={openActions.length ? `${openActions.length} open work-items` : "Geen open work-items"} detail={openActions[0]?.title ?? openCards[0]?.next_safe_step ?? "Geen open actie of statuskaart bekend."} tone="tertiary" />

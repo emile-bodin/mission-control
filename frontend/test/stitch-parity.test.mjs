@@ -10,7 +10,7 @@ async function source(path) {
 
 test("Cortex keeps Stitch zones bound to factual sources", async () => {
   const page = await source("page.tsx");
-  assert.match(page, /Autonome directives/);
+  assert.match(page, /Dagbriefing en context/);
   assert.match(page, /Workspace en clustercontext/);
   assert.match(page, /Chronologische agenda/);
   assert.match(page, /Stream Dock & Inname/);
@@ -18,6 +18,8 @@ test("Cortex keeps Stitch zones bound to factual sources", async () => {
   assert.match(page, /Geen stappenbron/);
   assert.match(page, /Geen activity- of herstelbron/);
   assert.doesNotMatch(page, /Claude 3\.7|tokens\s*\/\s*sec|GPU:\s*\d/i);
+  const topbar = await source("cortex-topbar.tsx");
+  assert.doesNotMatch(topbar, /AI SYNC: FACTUAL|Proposal service: unavailable/);
 });
 
 test("Homelab preserves telemetry panels as unavailable without fake values", async () => {
@@ -26,6 +28,7 @@ test("Homelab preserves telemetry panels as unavailable without fake values", as
   assert.match(page, /Unavailable by source/);
   assert.match(page, /\/api\/homelab/);
   assert.match(page, /\/api\/assets/);
+  assert.match(page, /Asset registry unavailable/);
   assert.doesNotMatch(page, /ALL SYSTEMS NOMINAL|RTX 4090|38\.4\s*\/\s*64/);
 });
 
@@ -41,11 +44,16 @@ test("Second Brain keeps paired stream entry flows and marks knowledge processin
 
 test("Briefings and projects preserve review and unavailable-source boundaries", async () => {
   const [briefings, projects] = await Promise.all([source("briefings/page.tsx"), source("projects/page.tsx")]);
-  assert.match(briefings, /AUTONOMOUS BRIEF/);
+  assert.match(briefings, /DAILY BRIEF/);
+  assert.match(briefings, /Gevalideerde briefing highlights/);
+  assert.doesNotMatch(briefings, /briefing\?\.unknowns\[0\]/);
+  assert.match(briefings, /Briefingbron unavailable/);
+  assert.match(briefings, /Voorstelbron unavailable/);
   assert.match(briefings, /expliciete bevestiging/i);
   assert.match(projects, /Linear and projects tracker/);
   assert.match(projects, /Activity stream/);
   assert.match(projects, /Repository state/);
   assert.match(projects, /HYD-160/);
+  assert.match(projects, /Projectregistry unavailable/);
   assert.doesNotMatch(projects, /COR-\d+|github\.com\//);
 });

@@ -9,10 +9,10 @@ type Homelab = { available: boolean; resources: PulseResource[] };
 export const dynamic = "force-dynamic";
 
 export default async function HomelabPage() {
-  const [assetsResponse, pulseResponse] = await Promise.all([fetch("http://backend:8000/api/assets", { cache: "no-store" }), fetch("http://backend:8000/api/homelab", { cache: "no-store" })]);
-  if (!assetsResponse.ok) throw new Error("Assets konden niet worden geladen.");
-  const assets: Asset[] = await assetsResponse.json();
-  const pulse: Homelab = pulseResponse.ok ? await pulseResponse.json() : { available: false, resources: [] };
+  const [assetsResponse, pulseResponse] = await Promise.all([fetch("http://backend:8000/api/assets", { cache: "no-store" }).catch(() => null), fetch("http://backend:8000/api/homelab", { cache: "no-store" }).catch(() => null)]);
+  const assetsAvailable = assetsResponse?.ok ?? false;
+  const assets: Asset[] = assetsResponse?.ok ? await assetsResponse.json() : [];
+  const pulse: Homelab = pulseResponse?.ok ? await pulseResponse.json() : { available: false, resources: [] };
   const online = pulse.resources.filter((resource) => resource.status.toLowerCase() === "online").length;
 
   return <main className="mx-auto max-w-[1600px] px-margin-mobile py-space-lg md:px-margin-desktop" aria-label="Homelab infrastructure telemetry">
@@ -26,7 +26,7 @@ export default async function HomelabPage() {
 
     <section className="mt-6" aria-label="Mission critical services"><StitchSectionTitle eyebrow="MISSION-CRITICAL SELF-HOSTED SERVICES" title="Feitelijke Pulse services" detail={pulse.available ? "READ-ONLY" : "UNKNOWN"} /><div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{pulse.resources.map((resource) => <ServiceCard key={`service-${resource.id}`} resource={resource} />)}{!pulse.resources.length && <StitchUnavailable className="md:col-span-2 xl:col-span-3" title="Geen feitelijke services" detail="Pulse levert geen resource-identiteiten." />}</div></section>
 
-    <section className="mt-6" aria-label="Manual assets"><StitchSectionTitle eyebrow="MANUAL ASSETS" title="Asset registry" detail="LOS VAN PULSE" /><div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{assets.map((asset) => <Link className="cortex-focus cortex-stitch-panel block p-3 transition-colors hover:bg-surface-container-high" href={`/homelab/${asset.id}`} key={asset.id}><div className="flex items-center justify-between gap-2"><span className="font-mono text-mono-data-sm text-primary">{asset.environment}</span><span className={`rounded px-2 py-1 font-mono text-mono-data-sm ${tone(asset.status)}`}>{asset.status}</span></div><h2 className="mt-4 font-headline text-headline-md text-on-surface">{asset.name}</h2><p className="mt-1 text-body-sm text-on-surface-variant">{asset.type} · {asset.host}</p><p className="mt-4 border-t border-surface-container-highest pt-2 font-mono text-mono-data-sm text-outline">{asset.address}</p></Link>)}{!assets.length && <StitchUnavailable className="md:col-span-2 xl:col-span-3" title="Geen handmatige assets" detail="Maak een asset om de bestaande detail- en edit-flow te gebruiken." />}</div></section>
+    <section className="mt-6" aria-label="Manual assets"><StitchSectionTitle eyebrow="MANUAL ASSETS" title="Asset registry" detail="LOS VAN PULSE" /><div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{assets.map((asset) => <Link className="cortex-focus cortex-stitch-panel block p-3 transition-colors hover:bg-surface-container-high" href={`/homelab/${asset.id}`} key={asset.id}><div className="flex items-center justify-between gap-2"><span className="font-mono text-mono-data-sm text-primary">{asset.environment}</span><span className={`rounded px-2 py-1 font-mono text-mono-data-sm ${tone(asset.status)}`}>{asset.status}</span></div><h2 className="mt-4 font-headline text-headline-md text-on-surface">{asset.name}</h2><p className="mt-1 text-body-sm text-on-surface-variant">{asset.type} · {asset.host}</p><p className="mt-4 border-t border-surface-container-highest pt-2 font-mono text-mono-data-sm text-outline">{asset.address}</p></Link>)}{!assetsAvailable ? <StitchUnavailable className="md:col-span-2 xl:col-span-3" title="Asset registry unavailable" detail="De handmatige assetbron kon niet worden geladen." /> : !assets.length && <StitchUnavailable className="md:col-span-2 xl:col-span-3" title="Geen handmatige assets" detail="Maak een asset om de bestaande detail- en edit-flow te gebruiken." />}</div></section>
   </main>;
 }
 

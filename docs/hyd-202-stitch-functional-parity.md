@@ -85,3 +85,88 @@ Screen-id: `fcabbedcf2874d47af933f92740f7b4b`.
 - `/api/projects`: lokale projectregistry en detailroutes.
 
 Niet geïmplementeerd als feit: AI provider/model/token/GPU-status, CPU/RAM/ZFS/SMART/networkwaarden of grafieken, lokale LLM-snelheid, Linear issues/PR's/cycles/blockers, repository/CI-data, RAG/embeddings/vector search, AI-classificatie/enrichment/transcriptie of automatische uitvoering.
+
+## Acceptance pass — 2026-09-06
+
+Bronnen voor deze pass: actuele Stitch HTML/CSS en screenshots in `.stitch/designs/`, deze matrix, actuele branch-render op `http://localhost:3100` en HTTPS-render op `https://hera.connect2home.nl`. Beide renders gaven voor alle vijf routes HTTP 200. Hera draait de lokaal herbouwde frontend op poort 3100.
+
+Er was geen beschikbare browser-engine voor klik-, viewport- of screenshotscenario's. Server-rendering is dus gecontroleerd; client-mutaties, detailnavigatie en responsive visual rendering zijn niet als uitgevoerd bewijs gemarkeerd. Dat is een verificatieblokker, geen verzonnen acceptancebewijs.
+
+### `/` — Cortex Command Dashboard
+
+| Blok | Pre-fix status | Implementation status | Acceptance status | Evidence | Remaining dependency |
+| --- | --- | --- | --- | --- | --- |
+| Topbar | partial | statische `AI SYNC: FACTUAL` en proposal-status verwijderd | accepted | lokale + Hera SSR bevatten geen runtimeclaim | — |
+| Dagbriefing en contextcards | partial | briefingfeit, komende agenda en open actie hebben eigen feitelijke mapping | accepted | SSR toont briefing/agenda/action-context; geen directive-label voor onbekenden | — |
+| Workspace strip | partial | lokale projectcontext met beschikbare/onbeschikbare badge | unavailable by source | HYD-160 workspace-details ontbreken expliciet | HYD-160 |
+| Cluster telemetry strip | partial | Pulse resource-count/status | accepted | SSR toont feitelijke `20/32 resources online` zonder cluster-healthclaim | Pulse detailmetrics ontbreken |
+| Chrono Stream | partial | agenda-items, lege/onbekende fallback en agendalink | partial | SSR toont vier agenda-items en link; click-flow niet uitgevoerd | browseracceptance |
+| Bio-Vitals | partial | activiteit/gewicht apart; steps, sleep/recovery en fasting apart unavailable | partial | SSR toont afzonderlijke categorieën; responsive visual niet uitgevoerd | browseracceptance; ontbrekende healthbronnen |
+| Stream Dock | partial | werkende `/ideas`-entry met HYD-201 capability-context | partial | SSR toont dock en link; paired capture niet uitgevoerd | browseracceptance |
+| Coprocessor | matched | proposal-only behouden | partial | SSR toont availability/error zonder apply-actie; interactie niet uitgevoerd | browseracceptance |
+
+Eindconclusie: structureel correct; nog niet volledig accepted door niet-uitgevoerde interactie/responsief bewijs.
+
+### `/briefings` — Executive Daily Briefing
+
+| Blok | Pre-fix status | Implementation status | Acceptance status | Evidence | Remaining dependency |
+| --- | --- | --- | --- | --- | --- |
+| Header en timestamp | matched | feitelijke run-status; unavailable state toegevoegd | accepted | lokale + Hera SSR tonen `DAILY BRIEF` | — |
+| Highlight cards | partial | uitsluitend `facts` als `FACT 01…`; unknowns niet als directive | accepted | SSR bevat `Gevalideerde briefing highlights` | — |
+| Facts en status | matched | facts/run/validatiefout gescheiden | accepted | SSR-section aanwezig | — |
+| Proposal review | matched | proposal-only review plus unavailable state | partial | structureel aanwezig; confirm-flow niet uitgevoerd | browseracceptance |
+| Unknowns | matched | aparte unknown/unavailable section | accepted | SSR-section aanwezig | — |
+| Context strips | partial | Linear is unavailable by source; Pulse blijft read-only | accepted | SSR toont beide strips | HYD-160 voor Linear details |
+
+Eindconclusie: structureel correct; proposalconfirmatie heeft nog browseracceptance nodig.
+
+### `/ideas` — Idea Incubator & Second Brain
+
+| Blok | Pre-fix status | Implementation status | Acceptance status | Evidence | Remaining dependency |
+| --- | --- | --- | --- | --- | --- |
+| Pairing | matched | HYD-201 pairing/error state | partial | clientcomponent en gerichte test; interactie niet uitgevoerd | browseracceptance + geldige pairing-code |
+| Capture dock | partial | echte stream-entry POST, typen en loading state | partial | clientcomponent en test; mutation niet uitgevoerd | browseracceptance |
+| Inbox, filters en empty state | partial | queryfilters, empty state en live reload | partial | component/test aanwezig; client-hydratie niet uitgevoerd | browseracceptance |
+| Triage, archive en deleted state | partial | echte mutation endpoints en state labels | partial | component/test aanwezig; mutation niet uitgevoerd | browseracceptance |
+| Error state | matched | retryable unavailable state | partial | component/test aanwezig; niet getriggerd | browseracceptance |
+| Processing matrix | partial | afzonderlijk unavailable panel | accepted | bron is aantoonbaar afwezig; geen AI-structurering | — |
+| Semantic/knowledge panels | unavailable by source | afzonderlijke unavailable panels | accepted | geen RAG/embeddings/classificatie getoond | — |
+
+Eindconclusie: layout en veilige flowstructuur aanwezig, maar client-only flow nog niet live geaccepteerd.
+
+### `/homelab` — Homelab & Infra Telemetry
+
+| Blok | Pre-fix status | Implementation status | Acceptance status | Evidence | Remaining dependency |
+| --- | --- | --- | --- | --- | --- |
+| Global health band | partial | Pulse facts/Unknown, geen nominal claim | accepted | lokale + Hera SSR tonen `GLOBAL SYSTEM HEALTH` | — |
+| Compute summary | missing | afzonderlijk unavailable panel | accepted | SSR-panel aanwezig | CPU-bron |
+| System summary | missing | afzonderlijk unavailable panel | accepted | SSR-panel aanwezig | RAM-bron |
+| Inference summary | missing | afzonderlijk unavailable panel | accepted | SSR-panel aanwezig | GPU-bron |
+| Storage summary | missing | afzonderlijk unavailable panel | accepted | SSR-panel aanwezig | storage-metriekbron |
+| Infrastructure nodes | partial | feitelijke Pulse identity/status/parent | accepted | SSR toont resourcecards zonder verzonnen rolmetrics | — |
+| Network telemetry | missing | eigen unavailable paneel, geen grafiek | accepted | SSR toont paneel | throughput/tijdreeksbron |
+| Local LLM velocity | missing | eigen unavailable paneel | accepted | SSR toont paneel; Codex niet als inferencebron | lokale inferencebron |
+| SMART matrix | missing | eigen unavailable paneel | accepted | SSR toont paneel | SMART/storage-healthbron |
+| Services en manual assets | partial/matched | services los van assets; asset-error state toegevoegd | partial | SSR toont beide; new/detail/edit links niet aangeklikt | browseracceptance |
+
+Eindconclusie: Stitch-decompositie server-side zichtbaar en alle ontbrekende bronnen per paneel begrensd; assetsubflow wacht op browseracceptance.
+
+### `/projects` — Linear & Projects Tracker
+
+| Blok | Pre-fix status | Implementation status | Acceptance status | Evidence | Remaining dependency |
+| --- | --- | --- | --- | --- | --- |
+| Tracker header/cycle controls | partial | cycle context expliciet unavailable | accepted | lokale + Hera SSR tonen `CYCLE: UNAVAILABLE` | HYD-160 |
+| Project summary en roadmap | partial | lokale registry, detailroutes, registry-error state | partial | SSR toont projectdata; detailroute niet geopend | browseracceptance |
+| Issue board | unavailable by source | drie afzonderlijke unavailable kolommen | accepted | SSR toont `UNAVAILABLE BY SOURCE` | HYD-160 issues |
+| Activity stream | unavailable by source | afzonderlijk unavailable paneel | accepted | SSR aanwezig | HYD-160 activity |
+| Repository state | unavailable by source | afzonderlijk unavailable paneel | accepted | SSR aanwezig | HYD-160 PR/repository read-model |
+| Copilot/proposal section | unavailable by source | geen fictief advies of mutatiepad | accepted | SSR aanwezig | HYD-160 + expliciete proposalbron |
+
+Eindconclusie: **structurally accepted, functionally source-blocked** voor HYD-160-data; lokale projectdetailnavigatie wacht op browseracceptance.
+
+## Acceptance defects and fixes
+
+- Verwijderd: statische claims `AI SYNC: FACTUAL` en `Proposal service: unavailable` in de topbar.
+- Gecorrigeerd: briefingfacts en unknowns werden visueel als directives behandeld. Highlight-cards tonen nu alleen feitelijke `FACT`-items; unknowns blijven apart.
+- Toegevoegd: expliciete unavailable states wanneer briefing-, proposal-, projectregistry- of assetbronnen falen. Fouten worden niet langer als lege data gepresenteerd.
+- Behouden: alle expliciete `Unavailable by source` blocks; geen fake telemetry, Linear-data, AI-output of automatische mutatie toegevoegd.
